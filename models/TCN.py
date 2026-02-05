@@ -38,7 +38,7 @@ class Model(nn.Module):
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
         if self.task_name == "supervised":
             dec_out = self.supervised(x_enc, x_mark_enc)
             return dec_out  # [B, N]

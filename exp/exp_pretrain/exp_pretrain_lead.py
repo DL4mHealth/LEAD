@@ -16,10 +16,11 @@ from sklearn.metrics import recall_score
 from sklearn.metrics import f1_score
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
+from utils.tools import multiclass_specificity
 from utils import eval_protocols
 from utils.losses import simclr_id_loss, simclr_loss, id_loss
 
-from utils.tools import calculate_subject_level_metrics
+from utils.tools import calculate_subject_level_metrics, get_metrics_string
 
 warnings.filterwarnings("ignore")
 
@@ -30,6 +31,7 @@ class Exp_Pretrain_LEAD(Exp_Basic):
 
         self.swa_model = optim.swa_utils.AveragedModel(self.model)
         self.swa = args.swa
+        self.lambda2 = args.lambda2
 
     def _build_model(self):
         # model input depends on data
@@ -37,10 +39,8 @@ class Exp_Pretrain_LEAD(Exp_Basic):
         # test_data, test_loader = self._get_data(flag="TEST")
         self.args.seq_len = train_data.max_seq_len  # redefine seq_len
         self.args.pred_len = 0
-        # self.args.enc_in = train_data.feature_df.shape[1]
-        # self.args.num_class = len(train_data.class_names)
-        self.args.enc_in = train_data.X.shape[2]  # redefine enc_in
-        self.args.num_class = len(np.unique(train_data.y[:, 0]))  # column 0 is the label
+        self.args.enc_in = int(train_data.enc_in)
+        self.args.num_class = int(train_data.num_class)
         # model init
         model = (
             self.model_dict[self.args.model].Model(self.args).float()
@@ -59,15 +59,7 @@ class Exp_Pretrain_LEAD(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        # use different losses for ablation study
-        if self.args.contrastive_loss == "all":
-            criterion = simclr_id_loss
-        elif self.args.contrastive_loss == "sample":
-            criterion = simclr_loss
-        elif self.args.contrastive_loss == "subject":
-            criterion = id_loss
-        else:
-            raise ValueError("Invalid contrastive loss type")
+        criterion = simclr_id_loss
         return criterion
 
     def encode(self, loader):
@@ -86,25 +78,27 @@ class Exp_Pretrain_LEAD(Exp_Basic):
                 padding_mask = padding_mask.float().to(self.device)
                 label = label_id[:, 0]
                 sub_id = label_id[:, 1]
-                dataset_id = label_id[:, 2]
+                fs = label_id[:, 2]
+                dataset_id = label_id[:, 3]
                 label = label.to(self.device)
                 sub_id = sub_id.to(self.device)
                 dataset_id = dataset_id.to(self.device)
 
                 if self.swa:
-                    reprs_h, _ = self.swa_model(batch_x, padding_mask, None, None)
+                    reprs_h, reprs_z = self.swa_model(batch_x, padding_mask, None, None, fs, None)
                 else:
-                    reprs_h, _ = self.model(batch_x, padding_mask, None, None)
-                reprs_h = reprs_h.reshape(reprs_h.shape[0], -1)
+                    reprs_h, reprs_z = self.model(batch_x, padding_mask, None, None, fs, None)
+                # ---- important: immediately move to cpu() to avoid GPU memory leak ----
+                reprs_h = reprs_h.reshape(reprs_h.shape[0], -1).detach().cpu().float().numpy()
                 reprs_list.append(reprs_h)
-                labels_list.append(label)
-                ids_list.append(sub_id)
-                dataset_ids_list.append(dataset_id)
+                labels_list.append(label.detach().cpu().numpy())
+                ids_list.append(sub_id.detach().cpu().numpy())
+                dataset_ids_list.append(dataset_id.detach().cpu().numpy())
 
-            reprs_array = torch.cat(reprs_list, dim=0).cpu().numpy()
-            labels = torch.cat(labels_list, dim=0).cpu().numpy()
-            sub_ids = torch.cat(ids_list, dim=0).cpu().numpy()
-            dataset_ids = torch.cat(dataset_ids_list, dim=0).cpu().numpy()
+            reprs_array = np.concatenate(reprs_list, axis=0)
+            labels = np.concatenate(labels_list, axis=0)
+            sub_ids = np.concatenate(ids_list, axis=0)
+            dataset_ids = np.concatenate(dataset_ids_list, axis=0)
 
         if self.swa:
             self.swa_model.train(org_training)
@@ -134,15 +128,19 @@ class Exp_Pretrain_LEAD(Exp_Basic):
                 "Accuracy": accuracy_score(trues[mask], predictions[mask]),
                 "Precision": precision_score(trues[mask], predictions[mask], average="macro"),
                 "Recall": recall_score(trues[mask], predictions[mask], average="macro"),
+                "Specificity": multiclass_specificity(trues[mask], predictions[mask]),
                 "F1": f1_score(trues[mask], predictions[mask], average="macro"),
                 "AUROC": roc_auc_score(trues_onehot[mask], probs[mask], multi_class="ovr"),
                 "AUPRC": average_precision_score(trues_onehot[mask], probs[mask], average="macro"),
             }  # sample-level performance metrics
             dataset_sample_results_list.append(sample_metrics_dict)
 
-            subject_metrics_dict = calculate_subject_level_metrics(
-                predictions[mask], trues[mask], vali_ids[mask], self.args.num_class
-            )  # subject-level performance metrics, do voting for each subject
+            if self.args.use_subject_vote:
+                subject_metrics_dict = calculate_subject_level_metrics(
+                    predictions[mask], trues[mask], vali_ids[mask], self.args.num_class
+                )  # subject-level performance metrics, do voting for each subject
+            else:
+                subject_metrics_dict = None
             dataset_subject_results_list.append(subject_metrics_dict)
 
         def get_average_metrics(metrics_list):
@@ -155,7 +153,10 @@ class Exp_Pretrain_LEAD(Exp_Basic):
             return average_metrics
 
         average_sample_metrics = get_average_metrics(dataset_sample_results_list)
-        average_subject_metrics = get_average_metrics(dataset_subject_results_list)
+        if self.args.use_subject_vote:
+            average_subject_metrics = get_average_metrics(dataset_subject_results_list)
+        else:
+            average_subject_metrics = None
 
         if self.swa:
             self.swa_model.train()
@@ -168,14 +169,17 @@ class Exp_Pretrain_LEAD(Exp_Basic):
         train_data, train_loader = self._get_data(flag="TRAIN")
         vali_data, vali_loader = self._get_data(flag="VAL")
         test_data, test_loader = self._get_data(flag="TEST")
-        print("Pretraining data shape: ", pretrain_data.X.shape)
-        print("Pretraining label shape: ", pretrain_data.y.shape)
-        print("Training data shape: ", train_data.X.shape)
-        print("Training label shape: ", train_data.y.shape)
-        print("Validation data shape: ", vali_data.X.shape)
-        print("Validation label shape: ", vali_data.y.shape)
-        print("Test data shape: ", test_data.X.shape)
-        print("Test label shape: ", test_data.y.shape)
+        print(
+            f"Pretraining samples: {len(pretrain_data)}, "
+            f"seq_len (max): {getattr(pretrain_data, 'max_seq_len', 'NA')}, "
+            f"enc_in: {getattr(pretrain_data, 'enc_in', 'NA')},")
+        print(
+            f"Training samples: {len(train_data)}, "
+            f"seq_len (max): {getattr(train_data, 'max_seq_len', 'NA')}, "
+            f"enc_in: {getattr(train_data, 'enc_in', 'NA')}, "
+            f"num_class: {getattr(train_data, 'num_class', 'NA')}")
+        print(f"Validation samples: {len(vali_data)}")
+        print(f"Test samples: {len(test_data)}")
 
         path = (
             "./checkpoints/"
@@ -218,17 +222,14 @@ class Exp_Pretrain_LEAD(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 padding_mask = padding_mask.float().to(self.device)
                 sub_id = label_id[:, 1]   # first column is the label, second column is subject id
+                fs = label_id[:, 2]
+                dataset_id = label_id[:, 3]
                 sub_id = sub_id.to(self.device)
 
-                _, reprs_z_1 = self.model(batch_x, padding_mask, None, None)
-                _, reprs_z_2 = self.model(batch_x, padding_mask, None, None)
+                _, reprs_z_1 = self.model(batch_x, padding_mask, None, None, fs, None)
+                _, reprs_z_2 = self.model(batch_x, padding_mask, None, None, fs, None)
                 # cross contrast, use different losses for ablation study
-                if self.args.contrastive_loss == "all" or self.args.contrastive_loss == "subject":
-                    loss = criterion(reprs_z_1, reprs_z_2, sub_id)
-                elif self.args.contrastive_loss == "sample":
-                    loss = criterion(reprs_z_1, reprs_z_2)
-                else:
-                    raise ValueError("Invalid contrastive loss type")
+                loss = criterion(reprs_z_1, reprs_z_2, sub_id, lambda1=(1 - self.lambda2), lambda2=self.lambda2)
                 train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -264,42 +265,13 @@ class Exp_Pretrain_LEAD(Exp_Basic):
                 sample_test_metrics_dict, subject_test_metrics_dict = self.vali(train_loader, test_loader)
 
                 current_lr = scheduler.get_last_lr()[0]
-                print(
-                    f"Epoch: {epoch + 1}, "
-                    f"Steps: {train_steps}, | Train Loss: {train_loss:.5f} | Learning Rate: {current_lr:.5e}\n"
-
-                    f"Sample-level results: \n"
-                    f"Validation results , "
-                    f"Accuracy: {sample_val_metrics_dict['Accuracy']:.5f}, "
-                    f"Precision: {sample_val_metrics_dict['Precision']:.5f}, "
-                    f"Recall: {sample_val_metrics_dict['Recall']:.5f}, "
-                    f"F1: {sample_val_metrics_dict['F1']:.5f}, "
-                    f"AUROC: {sample_val_metrics_dict['AUROC']:.5f}, "
-                    f"AUPRC: {sample_val_metrics_dict['AUPRC']:.5f}\n"
-                    f"Test results , "
-                    f"Accuracy: {sample_test_metrics_dict['Accuracy']:.5f}, "
-                    f"Precision: {sample_test_metrics_dict['Precision']:.5f}, "
-                    f"Recall: {sample_test_metrics_dict['Recall']:.5f} "
-                    f"F1: {sample_test_metrics_dict['F1']:.5f}, "
-                    f"AUROC: {sample_test_metrics_dict['AUROC']:.5f}, "
-                    f"AUPRC: {sample_test_metrics_dict['AUPRC']:.5f}\n"
-                    
-                    f"Subject-level results after majority voting: \n"
-                    f"Validation results, "
-                    f"Accuracy: {subject_val_metrics_dict['Accuracy']:.5f}, "
-                    f"Precision: {subject_val_metrics_dict['Precision']:.5f}, "
-                    f"Recall: {subject_val_metrics_dict['Recall']:.5f}, "
-                    f"F1: {subject_val_metrics_dict['F1']:.5f}, "
-                    f"AUROC: {subject_val_metrics_dict['AUROC']:.5f}, "
-                    f"AUPRC: {subject_val_metrics_dict['AUPRC']:.5f}\n"
-                    f"Test results, "
-                    f"Accuracy: {subject_test_metrics_dict['Accuracy']:.5f}, "
-                    f"Precision: {subject_test_metrics_dict['Precision']:.5f}, "
-                    f"Recall: {subject_test_metrics_dict['Recall']:.5f} "
-                    f"F1: {subject_test_metrics_dict['F1']:.5f}, "
-                    f"AUROC: {subject_test_metrics_dict['AUROC']:.5f}, "
-                    f"AUPRC: {subject_test_metrics_dict['AUPRC']:.5f}\n"
-                )
+                sample_metrics_string = get_metrics_string(sample_val_metrics_dict, sample_test_metrics_dict)
+                print(f"Epoch: {epoch + 1}, "
+                      f"Steps: {train_steps}, | Train Loss: {train_loss:.5f} | Learning Rate: {current_lr:.5e}\n")
+                print(f"Sample-level results: \n{sample_metrics_string}")
+                if self.args.use_subject_vote:  # subject-level results
+                    subject_metrics_string = get_metrics_string(subject_val_metrics_dict, subject_test_metrics_dict)
+                    print(f"Subject-level results after majority voting: \n{subject_metrics_string}")
             """early_stopping(
                 train_loss,
                 self.swa_model if self.swa else self.model,
@@ -308,12 +280,16 @@ class Exp_Pretrain_LEAD(Exp_Basic):
             if early_stopping.early_stop:
                 print("Early stopping")
                 break"""  # no early stopping for pretraining
-            print("Saving model...")
-            if self.swa:
-                torch.save(self.swa_model.state_dict(), path + '/' + "checkpoint.pth")
-            else:
-                torch.save(self.model.state_dict(), path + '/' + 'checkpoint.pth')
+            print("Saving model...\n")
+            try:
+                if self.swa:
+                    torch.save(self.swa_model.state_dict(), path + '/' + "checkpoint.pth")
+                else:
+                    torch.save(self.model.state_dict(), path + '/' + 'checkpoint.pth')
+            except Exception as e:
+                print(f"Error saving model: {e}")
             scheduler.step()
+            print(f"------------------End of Epoch {epoch + 1}---------------------\n")
 
         model_path = path + "checkpoint.pth"
         print("Saving model...")
@@ -373,76 +349,18 @@ class Exp_Pretrain_LEAD(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        print(
-            f"Sample-level results: \n"
-            f"Validation results , "
-            f"Accuracy: {sample_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {sample_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results , "
-            f"Accuracy: {sample_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_test_metrics_dict['Recall']:.5f} "
-            f"F1: {sample_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_test_metrics_dict['AUPRC']:.5f}\n"
-
-            f"Subject-level results after majority voting: \n"
-            f"Validation results, "
-            f"Accuracy: {subject_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {subject_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results, "
-            f"Accuracy: {subject_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_test_metrics_dict['Recall']:.5f} "
-            f"F1: {subject_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_test_metrics_dict['AUPRC']:.5f}\n"
-        )
+        sample_metrics_string = get_metrics_string(sample_val_metrics_dict, sample_test_metrics_dict)
+        print(f"Sample-level results: \n{sample_metrics_string}")
+        if self.args.use_subject_vote:  # subject-level results
+            subject_metrics_string = get_metrics_string(subject_val_metrics_dict, subject_test_metrics_dict)
+            print(f"Subject-level results after majority voting: \n{subject_metrics_string}")
         file_name = "results.txt"
         file_path = os.path.join(folder_path, file_name)
         f = open(file_path, "a")
         f.write("Model Setting: " + setting + "  \n")
-        f.write(
-            f"Sample-level results: \n"
-            f"Validation results , "
-            f"Accuracy: {sample_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {sample_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results , "
-            f"Accuracy: {sample_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_test_metrics_dict['Recall']:.5f} "
-            f"F1: {sample_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_test_metrics_dict['AUPRC']:.5f}\n"
-
-            f"Subject-level results after majority voting: \n"
-            f"Validation results, "
-            f"Accuracy: {subject_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {subject_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results, "
-            f"Accuracy: {subject_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_test_metrics_dict['Recall']:.5f} "
-            f"F1: {subject_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_test_metrics_dict['AUPRC']:.5f}\n"
-        )
+        f.write(f"Sample-level results: \n{sample_metrics_string}")
+        if self.args.use_subject_vote:
+            f.write(f"Subject-level results after majority voting: \n{subject_metrics_string}")
         f.write("\n")
         f.close()
 

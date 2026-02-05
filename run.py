@@ -4,10 +4,6 @@ import torch
 from exp.exp_supervised import Exp_Supervised
 from exp.exp_finetune import Exp_Finetune
 from exp.exp_pretrain.exp_pretrain_lead import Exp_Pretrain_LEAD
-from exp.exp_pretrain.exp_pretrain_moco import Exp_Pretrain_MOCO
-from exp.exp_pretrain.exp_pretrain_ts2vec import Exp_Pretrain_TS2Vec
-from exp.exp_pretrain.exp_pretrain_biot import Exp_Pretrain_BIOT
-from exp.exp_pretrain.exp_pretrain_eeg2rep import Exp_Pretrain_EEG2Rep
 import random
 import numpy as np
 from utils.tools import compute_avg_std
@@ -31,17 +27,31 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, required=True, default='Single-Dataset', help='dataset type')
     parser.add_argument('--root_path', type=str, default='./dataset/', help='root path of all dataset folders')
     parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
-    parser.add_argument("--pretraining_datasets", type=str, default="ADSZ,APAVA-19,ADFSU,AD-Auditory,TDBRAIN-19,TUEP,REEG-PD-19",
+    parser.add_argument("--pretraining_datasets", type=str,
+                        default="TDBRAIN",
                         help="List of datasets folder names for pretraining (No overlapping with downstream datasets).")
-    parser.add_argument("--training_datasets", type=str, default="ADFTD,CNBPM,Cognision-rsEEG-19,Cognision-ERP-19,BrainLat-19",
-                        help="List of datasets folder names for pretraining linear probe, supervised, and finetune training.")
-    parser.add_argument("--testing_datasets", type=str, default="ADFTD,CNBPM,Cognision-rsEEG-19,Cognision-ERP-19,BrainLat-19",
-                        help="List of datasets folder names for pretraining linear probe, supervised, and finetune validation and test.")
-    parser.add_argument('--checkpoints_path', type=str, default='./checkpoints/LEAD/pretrain_lead/LEAD/P-11-Base/',
+    parser.add_argument("--training_datasets", type=str,
+                        default="ADFTD",
+                        help="List of datasets folder names for linear probe, supervised, and finetune training.")
+    parser.add_argument("--testing_datasets", type=str,
+                        default="ADFTD",
+                        help="List of datasets folder names for linear probe, supervised, and finetune validation and test.")
+    parser.add_argument('--checkpoints_path', type=str, default='./checkpoints/LEAD/pretrain_lead/LEAD/P-12/',
                         help='location of pre-trained model checkpoints')
+    parser.add_argument('--classify_choice', type=str, default='multi_class',
+                        help="classify AD vs HC, AD vs Non-AD (HC and all other classes, e.g, FTD), "
+                             "HC vs Abnormal (All kinds of diseases) or multiclass, "
+                             "options:[ad_vs_hc, ad_vs_nonad, hc_vs_abnormal, hc_vs_mci, ad_vs_mci, multi_class]")
+    # parser.add_argument('--sampling_rate', type=int, default=128, help='frequency sampling rate')
+    parser.add_argument('--ratio_a', type=float, default=0.8, help='training subject ratio')
+    parser.add_argument('--ratio_b', type=float, default=0.9, help='training & validation subject ratio')
+    parser.add_argument('--low_cut', type=float, default=0.5, help='low cut for bandpass filter')
+    parser.add_argument('--high_cut', type=float, default=45, help='high cut for bandpass filter')
+
+
 
     # model define for baselines
-    parser.add_argument('--top_k', type=int, default=5, help='for TimesBlock')
+    parser.add_argument('--top_k', type=int, default=1, help='for TimesBlock')
     parser.add_argument('--num_kernels', type=int, default=6, help='for Inception')
     parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
     parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
@@ -60,13 +70,27 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.1, help='dropout')
     parser.add_argument('--embed', type=str, default='timeF',
                         help='time features encoding, options:[timeF, fixed, learned]')
+    parser.add_argument("--freq", type=str, default="h", help="freq for time features encoding, "
+                        "options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly],",)
     parser.add_argument('--activation', type=str, default='gelu', help='activation')
     parser.add_argument('--output_attention', action='store_true', help='whether to output attention in encoder')
-    parser.add_argument('--patch_len', type=int, default=32, help='patch_len used in PatchTST, BIOT')
-    parser.add_argument('--stride', type=int, default=8, help='stride used in PatchTST')
-
-    # ADformer/LEAD params
-    parser.add_argument("--patch_len_list", type=str, default="4", help="a list of patch len used in Medformer, ADformer")
+    parser.add_argument('--patch_len', type=int, default=50, help='patch_len used in PatchTST, BIOT,LEADv2')
+    parser.add_argument('--stride', type=int, default=50, help='stride used in PatchTST, LEADv2')
+    parser.add_argument('--resolution_list', type=str, default="2,4,6,8")
+    parser.add_argument('--nodedim', type=int, default=10)
+    parser.add_argument('--ffn_ratio', type=int, default=2, help='ffn_ratio')
+    parser.add_argument('--num_blocks', nargs='+', type=int, default=[1, 1, 1, 1], help='num_blocks in each stage')
+    parser.add_argument('--large_size', nargs='+', type=int, default=[31, 29, 27, 13], help='big kernel size')
+    parser.add_argument('--small_size', nargs='+', type=int, default=[5, 5, 5, 5],
+                        help='small kernel size for structral reparam')
+    parser.add_argument('--dims', nargs='+', type=int, default=[128, 128, 128, 128], help='dmodels in each stage')
+    parser.add_argument('--dw_dims', nargs='+', type=int, default=[256, 256, 256, 256],
+                        help='dw dims in dw conv in each stage')
+    parser.add_argument('--brain_regions', type=str, default='0,0,0,0,0,0,0,2,4,4,4,2,2,1,1,1,2,3,3',
+                        help='brain region label for each channel used in CSBrain')
+    # ADformer params
+    parser.add_argument("--patch_len_list", type=str, default="4",
+                        help="a list of patch len used in Medformer, ADformer")
     parser.add_argument("--up_dim_list", type=str, default="76",
                         help="a list of up dimension factor used in ADformer")
     parser.add_argument("--augmentations", type=str, default="flip,frequency,jitter,mask,channel,drop",
@@ -80,17 +104,19 @@ if __name__ == '__main__':
     parser.add_argument("--no_channel_block", action="store_true",
                         help="whether to use channel block in encoder", default=False)
 
-    # MOCO params
-    parser.add_argument('--K', type=int, default=65536, help='Size of the queue in MOCO method')
-    parser.add_argument('--momentum', type=float, default=0.999, help='Momentum for updating the key encoder')
-    parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for the softmax in MOCO method')
+    # LEAD/LEADv2 params
+    parser.add_argument('--cross_patch_len', type=int, default=4, help='cross channel patch length used in LEAD')
+    parser.add_argument('--scaled_channel_num', type=int, default=76, help='scaled channel number used in LEAD')
+    parser.add_argument('--group_shuffle', action='store_true', help='use index group shuffle', default=False)
+    parser.add_argument('--group_size', type=int, default=2, help='group size for group shuffle')
+    parser.add_argument('--sampling_rate_list', type=str, default="200", help="list of all sampling rate")
+    parser.add_argument('--use_subject_loss', action="store_true", help="use subject-regularized loss", default=False)
+    parser.add_argument('--lambda2', type=float, default=0.75, help='weight of subject-level contrast, range in [0,1]')
+    parser.add_argument('--channel_names', type=str, help='channel names', default='Fp1,Fp2,F7,F3,Fz,F4,F8,T7,C3,Cz,C4,T8,P7,P3,Pz,P4,P8,O1,O2')
+    parser.add_argument('--montage_name', type=str, default='standard_1005', help='montage name for EEG channels, same as MNE library')
+    parser.add_argument('--use_subject_vote', action='store_true', help='sample voting for subject-level performance', default=False)
 
-    # EEG2Rpe params
-    parser.add_argument('--mask_ratio', type=float, default=0.5, help=" masking ratio")
 
-    # LEAD params
-    parser.add_argument('--contrastive_loss', type=str, default='all',
-                        help='contrastive loss modules enabled, options: [sample,subject,all]')
 
 
     # optimization
@@ -108,12 +134,12 @@ if __name__ == '__main__':
     parser.add_argument("--swa", action="store_true", help="use stochastic weight averaging", default=False)
     parser.add_argument('--no_normalize', action='store_true',
                         help='do not normalize data in data loader', default=False)
-    parser.add_argument('--sampling_rate', type=int, default=128, help='frequency sampling rate')
-    parser.add_argument('--low_cut', type=float, default=0.5, help='low cut for bandpass filter')
-    parser.add_argument('--high_cut', type=float, default=45, help='high cut for bandpass filter')
-    # fixed: fixed split, mccv: monte carlo cross validation, loso: leave-one-subject-out
-    parser.add_argument('--cross_val', type=str, default='fixed',
-                        help='cross validation methods, options: [fixed, mccv, loso]')
+    parser.add_argument('--single_channel_mask', type=str, default='none',
+                        help='channel mask for channel importance analysis, options: [None, Fp1, Fp2, ...]')
+    # fixed: fixed split, mccv: monte carlo cross validation,
+    # 5-fold: 5-fold cross validation, loso: leave-one-subject-out
+    parser.add_argument('--cross_val', type=str, default='mccv',
+                        help='cross validation methods, options: [fixed, mccv, 5-fold, loso]')
 
     # GPU
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
@@ -146,24 +172,11 @@ if __name__ == '__main__':
     elif args.task_name == 'pretrain_lead':
         print("Pretraining with LEAD method")
         Exp = Exp_Pretrain_LEAD
-    elif args.task_name == 'pretrain_moco':
-        print("Pretraining with MoCo method")
-        Exp = Exp_Pretrain_MOCO
-    elif args.task_name == 'pretrain_ts2vec':
-        print("Pretraining with TS2Vec method")
-        Exp = Exp_Pretrain_TS2Vec
-    elif args.task_name == 'pretrain_biot':
-        print("Pretraining with BIOT method")
-        Exp = Exp_Pretrain_BIOT
-    elif args.task_name == 'pretrain_eeg2rep':
-        print("Pretraining with EEG2Rep method")
-        Exp = Exp_Pretrain_EEG2Rep
     elif args.task_name == 'finetune':
         print("Finetune")
         Exp = Exp_Finetune
     else:
-        raise ValueError('task_name unknown, should be supervised, pretrain_lead, pretrain_moco, '
-                         'pretrain_ts2vec, pretrain_biot, pretrain_eeg2rep or finetune.')
+        raise ValueError('task_name unknown, should be supervised, pretrain_lead, or finetune.')
 
     total_params = 0
     sample_val_metrics_dict_list = []
@@ -222,6 +235,7 @@ if __name__ == '__main__':
                         sample_test_metrics_dict_list, subject_test_metrics_dict_list, total_params)
 
     elif args.is_training == 0:
+        # seed_list = [67, 69, 64, 58, 44, 104, 105, 91, 103, 85, 107, 109, 119, 120, 118]
         for ii in range(args.itr):
             seed = 41 + ii
             random.seed(seed)

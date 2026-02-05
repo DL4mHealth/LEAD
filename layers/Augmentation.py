@@ -70,6 +70,39 @@ class ChannelMask(nn.Module):
         return x
 
 
+class PatchMask(nn.Module):
+    """
+    Randomly mask single-channel patches.
+    x: (B, C, T)
+    mask unit: one (channel, patch_index)
+    """
+
+    def __init__(self, patch_len=25, ratio=0.1):
+        super().__init__()
+        self.patch_len = patch_len
+        self.ratio = ratio
+
+    def forward(self, x):
+        if self.training:
+            B, C, T = x.shape
+            num_patches = T // self.patch_len  # number of patches per channel
+            total_units = C * num_patches  # total (channel, patch) patches
+            num_mask = int(total_units * self.ratio)  # number of patches to mask
+
+            # select random (channel, patch_index)
+            idx = torch.randperm(total_units)[:num_mask].to(x.device)
+            ch_indices = idx // num_patches
+            p_indices = idx % num_patches
+
+            # mask the selected patches
+            for ch, p in zip(ch_indices, p_indices):
+                start = p * self.patch_len
+                end = start + self.patch_len
+                x[:, ch, start:end] = 0
+
+        return x
+
+
 class FrequencyMask(nn.Module):
     def __init__(self, ratio=0.1):
         super().__init__()
@@ -89,7 +122,7 @@ class FrequencyMask(nn.Module):
         return x
 
 
-def get_augmentation(augmentation):
+def get_augmentation(augmentation, patch_len=25):
     if augmentation.startswith("jitter"):
         if len(augmentation) == 6:
             return Jitter()
@@ -118,6 +151,10 @@ def get_augmentation(augmentation):
         if len(augmentation) == 7:
             return ChannelMask()
         return ChannelMask(float(augmentation[7:]))
+    elif augmentation.startswith("patch"):
+        if len(augmentation) == 5:
+            return PatchMask(patch_len)
+        return PatchMask(patch_len, float(augmentation[5:]))
     elif augmentation == "none":
         return nn.Identity()
     else:

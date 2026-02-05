@@ -16,8 +16,11 @@ from sklearn.metrics import recall_score
 from sklearn.metrics import f1_score
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
+from utils.tools import multiclass_specificity
+from typing import Dict, Tuple
 
-from utils.tools import calculate_subject_level_metrics
+from utils.tools import calculate_subject_level_metrics, get_metrics_string
+from utils.losses import subject_ce_loss
 
 warnings.filterwarnings("ignore")
 
@@ -35,10 +38,8 @@ class Exp_Supervised(Exp_Basic):
         # test_data, test_loader = self._get_data(flag="TEST")
         self.args.seq_len = train_data.max_seq_len  # redefine seq_len
         self.args.pred_len = 0
-        # self.args.enc_in = train_data.feature_df.shape[1]
-        # self.args.num_class = len(train_data.class_names)
-        self.args.enc_in = train_data.X.shape[2]  # redefine enc_in
-        self.args.num_class = len(np.unique(train_data.y[:, 0]))  # column 0 is the label
+        self.args.enc_in = int(train_data.enc_in)
+        self.args.num_class = int(train_data.num_class)
         # model init
         model = (
             self.model_dict[self.args.model].Model(self.args).float()
@@ -76,15 +77,16 @@ class Exp_Supervised(Exp_Basic):
                 padding_mask = padding_mask.float().to(self.device)
                 label = label_id[:, 0]
                 sub_id = label_id[:, 1]
-                dataset_id = label_id[:, 2]
+                fs = label_id[:, 2]
+                dataset_id = label_id[:, 3]
                 label = label.to(self.device)
                 sub_id = sub_id.to(self.device)
                 dataset_id = dataset_id.to(self.device)
 
                 if self.swa:
-                    outputs = self.swa_model(batch_x, padding_mask, None, None)
+                    outputs = self.swa_model(batch_x, padding_mask, None, None, fs, None)
                 else:
-                    outputs = self.model(batch_x, padding_mask, None, None)
+                    outputs = self.model(batch_x, padding_mask, None, None, fs, None)
 
                 pred = outputs.detach().cpu()
                 loss = criterion(pred, label.long().cpu())
@@ -130,35 +132,29 @@ class Exp_Supervised(Exp_Basic):
         for dataset_id in np.unique(dataset_ids):
             mask = dataset_ids == dataset_id  # mask for samples from the same dataset
 
-            sample_metrics_dict = {
-                "Accuracy": accuracy_score(trues[mask], predictions[mask]),
-                # "Precision": precision_score(trues[mask], predictions[mask], average="macro"),
-                # "Recall": recall_score(trues[mask], predictions[mask], average="macro"),
-                # "F1": f1_score(trues[mask], predictions[mask], average="macro"),
-                # "AUROC": roc_auc_score(trues_onehot[mask], probs[mask], multi_class="ovr"),
-                # "AUPRC": average_precision_score(trues_onehot[mask], probs[mask], average="macro"),
-            }  # sample-level performance metrics
+            # sample-level performance metrics
+            sample_metrics_dict = {"Accuracy": accuracy_score(trues[mask], predictions[mask])}
             # Check how many unique classes are present in the true labels
             unique_labels = np.unique(trues[mask])
             if len(unique_labels) < 2:
                 # If there is only one class(e,g, leave-one-subject-out validation),
                 # sample-level precision, recall, F1, AUROC and AUPRC are meaningless
-                sample_metrics_dict["Precision"] = -1
-                sample_metrics_dict["Recall"] = -1
-                sample_metrics_dict["F1"] = -1
-                sample_metrics_dict["AUROC"] = -1
-                sample_metrics_dict["AUPRC"] = -1
+                sample_metrics_dict.update({"Precision": -1, "Recall": -1, "Specificity": -1, "F1": -1, "AUROC": -1, "AUPRC": -1})
             else:
                 sample_metrics_dict["Precision"] = precision_score(trues[mask], predictions[mask], average="macro")
                 sample_metrics_dict["Recall"] = recall_score(trues[mask], predictions[mask], average="macro")
+                sample_metrics_dict["Specificity"] = multiclass_specificity(trues[mask], predictions[mask])
                 sample_metrics_dict["F1"] = f1_score(trues[mask], predictions[mask], average="macro")
                 sample_metrics_dict["AUROC"] = roc_auc_score(trues_onehot[mask], probs[mask], multi_class="ovr")
                 sample_metrics_dict["AUPRC"] = average_precision_score(trues_onehot[mask], probs[mask], average="macro")
             dataset_sample_results_list.append(sample_metrics_dict)
 
-            subject_metrics_dict = calculate_subject_level_metrics(
-                predictions[mask], trues[mask], ids[mask], self.args.num_class
-            )  # subject-level performance metrics, do voting for each subject
+            if self.args.use_subject_vote:
+                subject_metrics_dict = calculate_subject_level_metrics(
+                    predictions[mask], trues[mask], ids[mask], self.args.num_class
+                )  # subject-level performance metrics, do voting for each subject
+            else:
+                subject_metrics_dict = None
             dataset_subject_results_list.append(subject_metrics_dict)
 
         def get_average_metrics(metrics_list):
@@ -171,7 +167,10 @@ class Exp_Supervised(Exp_Basic):
             return average_metrics
 
         average_sample_metrics = get_average_metrics(dataset_sample_results_list)
-        average_subject_metrics = get_average_metrics(dataset_subject_results_list)
+        if self.args.use_subject_vote:
+            average_subject_metrics = get_average_metrics(dataset_subject_results_list)
+        else:
+            average_subject_metrics = None
 
         if self.swa:
             self.swa_model.train()
@@ -183,12 +182,13 @@ class Exp_Supervised(Exp_Basic):
         train_data, train_loader = self._get_data(flag="TRAIN")
         vali_data, vali_loader = self._get_data(flag="VAL")
         test_data, test_loader = self._get_data(flag="TEST")
-        print("Training data shape: ", train_data.X.shape)
-        print("Training label shape: ", train_data.y.shape)
-        print("Validation data shape: ", vali_data.X.shape)
-        print("Validation label shape: ", vali_data.y.shape)
-        print("Test data shape: ", test_data.X.shape)
-        print("Test label shape: ", test_data.y.shape)
+        print(
+            f"Training samples: {len(train_data)}, "
+            f"seq_len (max): {getattr(train_data, 'max_seq_len', 'NA')}, "
+            f"enc_in: {getattr(train_data, 'enc_in', 'NA')}, "
+            f"num_class: {getattr(train_data, 'num_class', 'NA')}")
+        print(f"Validation samples: {len(vali_data)}")
+        print(f"Test samples: {len(test_data)}")
 
         path = (
             "./checkpoints/"
@@ -216,6 +216,9 @@ class Exp_Supervised(Exp_Basic):
         model_optim = self._select_optimizer()
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(model_optim, T_max=self.args.train_epochs)
         criterion = self._select_criterion()
+        total_params = sum(p.numel() for p in self.model.parameters())
+        print(f"Total parameters: {total_params}")
+
 
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -231,10 +234,16 @@ class Exp_Supervised(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 padding_mask = padding_mask.float().to(self.device)
                 label = label_id[:, 0]
+                ids = label_id[:, 1]
+                fs = label_id[:, 2]
+                dataset_id = label_id[:, 3]
                 label = label.to(self.device)
 
-                outputs = self.model(batch_x, padding_mask, None, None)
-                loss = criterion(outputs, label.long())
+                outputs = self.model(batch_x, padding_mask, None, None, fs, None)
+                if self.args.use_subject_loss:
+                    loss = subject_ce_loss(outputs, label.long(), ids)
+                else:
+                    loss = criterion(outputs, label.long())
                 train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -255,6 +264,7 @@ class Exp_Supervised(Exp_Basic):
                     iter_count = 0
                     time_now = time.time()
 
+
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=4.0)
                 model_optim.step()
@@ -267,42 +277,13 @@ class Exp_Supervised(Exp_Basic):
             test_loss, sample_test_metrics_dict, subject_test_metrics_dict = self.vali(test_data, test_loader, criterion)
 
             current_lr = scheduler.get_last_lr()[0]
-            print(
-                f"Epoch: {epoch + 1}, "
-                f"Steps: {train_steps}, | Train Loss: {train_loss:.5f} | Learning Rate: {current_lr:.5e}\n"
-                
-                f"Sample-level results: \n"
-                f"Validation results --- Loss: {vali_loss:.5f}, "
-                f"Accuracy: {sample_val_metrics_dict['Accuracy']:.5f}, "
-                f"Precision: {sample_val_metrics_dict['Precision']:.5f}, "
-                f"Recall: {sample_val_metrics_dict['Recall']:.5f}, "
-                f"F1: {sample_val_metrics_dict['F1']:.5f}, "
-                f"AUROC: {sample_val_metrics_dict['AUROC']:.5f}, "
-                f"AUPRC: {sample_val_metrics_dict['AUPRC']:.5f}\n"
-                f"Test results --- Loss: {test_loss:.5f}, "
-                f"Accuracy: {sample_test_metrics_dict['Accuracy']:.5f}, "
-                f"Precision: {sample_test_metrics_dict['Precision']:.5f}, "
-                f"Recall: {sample_test_metrics_dict['Recall']:.5f} "
-                f"F1: {sample_test_metrics_dict['F1']:.5f}, "
-                f"AUROC: {sample_test_metrics_dict['AUROC']:.5f}, "
-                f"AUPRC: {sample_test_metrics_dict['AUPRC']:.5f}\n"
-                
-                f"Subject-level results after majority voting: \n"
-                f"Validation results, "
-                f"Accuracy: {subject_val_metrics_dict['Accuracy']:.5f}, "
-                f"Precision: {subject_val_metrics_dict['Precision']:.5f}, "
-                f"Recall: {subject_val_metrics_dict['Recall']:.5f}, "
-                f"F1: {subject_val_metrics_dict['F1']:.5f}, "
-                f"AUROC: {subject_val_metrics_dict['AUROC']:.5f}, "
-                f"AUPRC: {subject_val_metrics_dict['AUPRC']:.5f}\n"
-                f"Test results, "
-                f"Accuracy: {subject_test_metrics_dict['Accuracy']:.5f}, "
-                f"Precision: {subject_test_metrics_dict['Precision']:.5f}, "
-                f"Recall: {subject_test_metrics_dict['Recall']:.5f} "
-                f"F1: {subject_test_metrics_dict['F1']:.5f}, "
-                f"AUROC: {subject_test_metrics_dict['AUROC']:.5f}, "
-                f"AUPRC: {subject_test_metrics_dict['AUPRC']:.5f}\n"
-            )
+            sample_metrics_string = get_metrics_string(sample_val_metrics_dict, sample_test_metrics_dict)
+            print(f"Epoch: {epoch + 1}, "
+                  f"Steps: {train_steps}, | Train Loss: {train_loss:.5f} | Learning Rate: {current_lr:.5e}\n")
+            print(f"Sample-level results: \n{sample_metrics_string}")
+            if self.args.use_subject_vote:  # subject-level results
+                subject_metrics_string = get_metrics_string(subject_val_metrics_dict, subject_test_metrics_dict)
+                print(f"Subject-level results after majority voting: \n{subject_metrics_string}")
             early_stopping(
                 -sample_val_metrics_dict["F1"],
                 self.swa_model if self.swa else self.model,
@@ -312,18 +293,19 @@ class Exp_Supervised(Exp_Basic):
                 print("Early stopping")
                 break
             scheduler.step()
+            print(f"------------------End of Epoch {epoch + 1}---------------------\n")
 
         best_model_path = path + "checkpoint.pth"
-        # for swa model, to best leverage the functionality of stochastic weight average,
+        """# for swa model, to best leverage the functionality of stochastic weight average,
         # we take the last model as the final model,
-        # which is the model after args.patience epochs (early stop counting) of best model on validation set
+        # which is the model after args.patience epochs (early stop counting) of best model on validation set"""
         if self.swa:
-            try:
+            """try:
                 print("Saving the last model to leverage the functionality of stochastic weight average")
                 torch.save(self.swa_model.state_dict(), best_model_path)
             except Exception as e:
-                print(f"Error saving model: {e}")
-            # self.swa_model.load_state_dict(torch.load(best_model_path))
+                print(f"Error saving model: {e}")"""
+            self.swa_model.load_state_dict(torch.load(best_model_path))
         # for normal model, we simply take the best model on validation set
         else:
             self.model.load_state_dict(torch.load(best_model_path))
@@ -377,76 +359,18 @@ class Exp_Supervised(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        print(
-            f"Sample-level results: \n"
-            f"Validation results --- Loss: {vali_loss:.5f}, "
-            f"Accuracy: {sample_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {sample_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results --- Loss: {test_loss:.5f}, "
-            f"Accuracy: {sample_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_test_metrics_dict['Recall']:.5f} "
-            f"F1: {sample_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_test_metrics_dict['AUPRC']:.5f}\n"
-
-            f"Subject-level results after majority voting: \n"
-            f"Validation results, "
-            f"Accuracy: {subject_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {subject_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results, "
-            f"Accuracy: {subject_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_test_metrics_dict['Recall']:.5f} "
-            f"F1: {subject_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_test_metrics_dict['AUPRC']:.5f}\n"
-        )
+        sample_metrics_string = get_metrics_string(sample_val_metrics_dict, sample_test_metrics_dict)
+        print(f"Sample-level results: \n{sample_metrics_string}")
+        if self.args.use_subject_vote:  # subject-level results
+            subject_metrics_string = get_metrics_string(subject_val_metrics_dict, subject_test_metrics_dict)
+            print(f"Subject-level results after majority voting: \n{subject_metrics_string}")
         file_name = "results.txt"
         file_path = os.path.join(folder_path, file_name)
         f = open(file_path, "a")
         f.write("Model Setting: " + setting + "  \n")
-        f.write(
-            f"Sample-level results: \n"
-            f"Validation results --- Loss: {vali_loss:.5f}, "
-            f"Accuracy: {sample_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {sample_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results --- Loss: {test_loss:.5f}, "
-            f"Accuracy: {sample_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {sample_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {sample_test_metrics_dict['Recall']:.5f} "
-            f"F1: {sample_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {sample_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {sample_test_metrics_dict['AUPRC']:.5f}\n"
-
-            f"Subject-level results after majority voting: \n"
-            f"Validation results, "
-            f"Accuracy: {subject_val_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_val_metrics_dict['Recall']:.5f}, "
-            f"F1: {subject_val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_val_metrics_dict['AUPRC']:.5f}\n"
-            f"Test results, "
-            f"Accuracy: {subject_test_metrics_dict['Accuracy']:.5f}, "
-            f"Precision: {subject_test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {subject_test_metrics_dict['Recall']:.5f} "
-            f"F1: {subject_test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {subject_test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {subject_test_metrics_dict['AUPRC']:.5f}\n"
-        )
+        f.write(f"Sample-level results: \n{sample_metrics_string}")
+        if self.args.use_subject_vote:
+            f.write(f"Subject-level results after majority voting: \n{subject_metrics_string}")
         f.write("\n")
         f.close()
 

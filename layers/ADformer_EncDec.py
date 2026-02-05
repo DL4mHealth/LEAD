@@ -62,7 +62,7 @@ class Encoder(nn.Module):
             x_c = None"""
         # only concat the routers. router is the last patch/channel of each element in the list
 
-        if x_t:
+        """if x_t:
             x_t = torch.cat([x[:, -1, :].unsqueeze(1) for x in x_t], dim=1)   # (batch_size, len(patch_len_list), d_model)
         else:
             x_t = None
@@ -73,6 +73,15 @@ class Encoder(nn.Module):
 
         if self.norm is not None:
             x_t = self.norm(x_t) if x_t is not None else None
-            x_c = self.norm(x_c) if x_c is not None else None
+            x_c = self.norm(x_c) if x_c is not None else None"""
+
+        if x_t:
+            x_t = x_t
+        else:
+            x_t = None
+        if x_c:
+            x_c = x_c
+        else:
+            x_c = None
 
         return x_t, x_c, attns_t, attns_c

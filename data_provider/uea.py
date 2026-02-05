@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import torch
 from itertools import repeat
-from scipy.signal import butter, lfilter, filtfilt
+from scipy.signal import butter, lfilter, filtfilt, resample
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.utils import shuffle
 
@@ -129,7 +129,6 @@ def subsample(y, limit=256, factor=2):
     return y
 
 
-
 def bandpass_filter_func(signal, fs, lowcut, highcut):
     # length of signal
     fft_len = signal.shape[1]
@@ -171,37 +170,116 @@ def normalize_batch_ts(batch):
     return normalized_batch
 
 
-def load_data_by_ids(data_path, label_path, ids):
+# resample the time series data from original_fs to target_fs
+"""def resample_time_series(data, original_fs, target_fs):
+    T, C = data.shape
+    new_length = int(T * target_fs / original_fs)
+
+    resampled_data = np.zeros((new_length, C))
+    for i in range(C):
+        resampled_data[:, i] = resample(data[:, i], new_length)
+
+    return resampled_data
+
+
+def split_eeg_segments(data, segment_length=128, overlapping=0.5):
     '''
-    Loads subjects with IDs in the ids list
-    Args:
-        data_path: directory of data files
-        label_path: directory of label.npy file
-        ids: list of subject IDs to load
+    Splits EEG data into overlapping segments.
+
+    Parameters:
+        data (numpy.ndarray): EEG data of shape (T, C), where T is the time dimension and C is the number of channels.
+        segment_length (int): Length of each segment.
+        overlapping (float): Overlap ratio between consecutive segments (0 to 1).
+
     Returns:
-        X: (N, T, C)
-        y: (N, 2), first column is label, second column is subject ID
+        numpy.ndarray: Segmented EEG data of shape (num_segments, segment_length, C).
     '''
-    feature_list = []
-    label_list = []
+    if overlapping < 0 or overlapping >= 1:
+        raise ValueError("Overlapping ratio must be between 0 and 1.")
+    T, C = data.shape
+    step_size = int(segment_length * (1 - overlapping))  # Compute step size based on overlap
+    num_segments = (T - segment_length) // step_size + 1  # Compute the number of segments
+    segments = np.array([data[i:i + segment_length] for i in range(0, num_segments * step_size, step_size)])
+
+    return segments
+
+
+def split_eeg_segments_per_scale(data, fs, segment_length, overlapping):
+    '''Split a single-scale (T, C) array into (N, segment_length, C) without crossing boundaries.'''
+    step = int(segment_length * (1 - overlapping))
+    T, C = data.shape
+    starts = range(0, max(T - segment_length + 1, 0), step)
+    segs = np.stack([data[s:s+segment_length] for s in starts], axis=0) if T >= segment_length else np.empty((0, segment_length, C))
+    fs_arr = np.full((segs.shape[0],), fs, dtype=np.float32)
+    return segs, fs_arr
+
+
+def load_data_by_ids(data_path, label_path, ids, args):
+    '''
+    Returns:
+        X:  (N, segment_length, C)
+        y:  (N, 2)  # same as your code
+        fs_arr: (N,)  # sampling rate per segment
+    '''
+    feature_list, label_list, fs_list = [], [], []
     subject_labels = np.load(label_path)
 
-    # load data by subject ids
+    segment_flag = False
     for filename in os.listdir(data_path):
-        # get subject ID from filename, e.g., 'AD_1.npy'
         sub_id = int(filename.split('_')[-1].split('.')[0])
-        # only load subject with ID in the ids list
-        if sub_id in ids:
-            # get label for the subject, all samples in the subject have the same label
-            subject_label = subject_labels[subject_labels[:, 1] == sub_id][0]
-            path = os.path.join(data_path, filename)
-            subject_feature = np.load(path)
-            for sample_feature in subject_feature:
-                feature_list.append(sample_feature)
-                label_list.append(subject_label)
-    # reshape and shuffle
-    X = np.array(feature_list)
-    y = np.array(label_list)
-    X, y = shuffle(X, y, random_state=42)
+        if sub_id not in ids:
+            continue
 
-    return X, y
+        subject_label = subject_labels[subject_labels[:, 1] == sub_id][0]
+        subject = np.load(os.path.join(data_path, filename))  # (T, C) or (N, T, C)
+
+        if subject.ndim == 2:
+            # build a pool of (data_i, fs_i) for this subject without concatenating on time axis
+            scale_pool = [(subject, args.sampling_rate)]
+            if args.use_multi_scale:
+                downsample_list = list(map(int, args.downsample_list.split(",")))
+                for ratio in downsample_list:
+                    ds = resample_time_series(subject, original_fs=args.sampling_rate, target_fs=args.sampling_rate // ratio)
+                    scale_pool.append((ds, args.sampling_rate // ratio))
+
+            # segment EACH scale independently, then append on sample axis
+            for data_i, fs_i in scale_pool:
+                segs, fs_arr = split_eeg_segments_per_scale(
+                    data_i, fs=fs_i, segment_length=args.segment_length, overlapping=args.overlapping
+                )
+                feature_list.append(segs)               # (Ni, L, C)
+                fs_list.append(fs_arr)                  # (Ni,)
+                label_list.append(np.tile(subject_label, (segs.shape[0], 1)))  # (Ni, 2)
+            segment_flag = True
+        elif subject.ndim == 3:
+            # already segmented; assume same fs across samples
+            segs = subject
+            feature_list.append(segs)
+            fs_list.append(np.full((segs.shape[0],), args.sampling_rate))
+            label_list.append(np.tile(subject_label, (segs.shape[0], 1)))
+        else:
+            raise ValueError(f"Unsupported shape: {subject.shape}")
+
+    # if data is in 2D format, it converted to 3D
+    if segment_flag:
+        print(f"2D Data in shape (T, C) loaded in 3D segments with length {args.segment_length} and overlap {args.overlapping}.")
+    else:
+        print("3D Data in shape (N, T, C) loaded in original shape, no segmentation applied.")
+    duration_list = []
+    sampling_rate_list = []
+    if args.use_multi_scale:
+        duration_list.append(args.segment_length // args.sampling_rate)
+        sampling_rate_list.append(args.sampling_rate)
+        for ratio in list(map(int, args.downsample_list.split(","))):
+            duration_list.append(args.segment_length // (args.sampling_rate // ratio))
+            sampling_rate_list.append(args.sampling_rate // ratio)
+        print(f"Multi-scale used. Segment durations (s): {duration_list}, Sampling rates (Hz): {sampling_rate_list}")
+
+    X = np.concatenate(feature_list, axis=0)   # (N, L, C)
+    y = np.concatenate(label_list, axis=0)     # (N, 2)
+    fs_arr = np.concatenate(fs_list, axis=0)   # (N,)
+    y = np.column_stack([y, fs_arr])  # (N, 3), last column is fs
+    X = X.astype(np.float32, copy=False)
+    y = y.astype(np.float32, copy=False)
+    X, y = shuffle(X, y, random_state=42)
+    return X, y"""

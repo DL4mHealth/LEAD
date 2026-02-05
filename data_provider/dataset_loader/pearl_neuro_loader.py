@@ -5,15 +5,16 @@ from torch.utils.data import Dataset, DataLoader
 from data_provider.uea import (
     normalize_batch_ts,
     bandpass_filter_func,
-    load_data_by_ids,
 )
 import warnings
 import random
+import json
+from data_provider.dataset_loader.base_loader import BaseLoader
 
 warnings.filterwarnings('ignore')
 
 
-def get_id_list_pearl_neuro(args, label_path, a=0.6, b=0.8):
+def get_id_list_pearl_neuro(args, data_list: np.ndarray, a=0.6, b=0.8):
     '''
     Loads subject IDs for all, training, validation, and test sets for PEARL-Neuro data
     Args:
@@ -30,13 +31,13 @@ def get_id_list_pearl_neuro(args, label_path, a=0.6, b=0.8):
     # random shuffle to break the potential influence of human named ID order,
     # e.g., put all healthy subjects first or put subjects with more samples first, etc.
     # (which could cause data imbalance in training, validation, and test sets)
-    data_list = np.load(label_path)
-
     all_ids = list(data_list[:, 1])
     if args.cross_val == 'fixed':  # fixed split
         random.seed(42)
     elif args.cross_val == 'mccv':  # Monte Carlo cross-validation
         random.seed(args.seed)
+    elif args.cross_val == '5-fold':
+        pass
     else:
         raise ValueError('Invalid cross_val. Please use fixed or mccv.')
     random.shuffle(all_ids)
@@ -47,39 +48,22 @@ def get_id_list_pearl_neuro(args, label_path, a=0.6, b=0.8):
     return sorted(all_ids), sorted(train_ids), sorted(val_ids), sorted(test_ids)
 
 
-class PEARLNeuroLoader(Dataset):
-    def __init__(self, args, root_path, flag=None):
-        self.no_normalize = args.no_normalize
-        self.root_path = root_path
-        self.data_path = os.path.join(root_path, 'Feature/')
-        self.label_path = os.path.join(root_path, 'Label/label.npy')
+class PEARLNeuroLoader(BaseLoader):
+    def _get_id_lists(self, args, data_list: np.ndarray, a: float, b: float):
+        # reuse existing splitting logic
+        return get_id_list_pearl_neuro(args, data_list, a, b)
 
-        a, b = 0.6, 0.8
-        self.all_ids, self.train_ids, self.val_ids, self.test_ids = get_id_list_pearl_neuro(args, self.label_path, a, b)
-        if flag == 'TRAIN':
-            ids = self.train_ids
-            print('train ids:', ids)
-        elif flag == 'VAL':
-            ids = self.val_ids
-            print('val ids:', ids)
-        elif flag == 'TEST':
-            ids = self.test_ids
-            print('test ids:', ids)
-        elif flag == 'PRETRAIN':
-            ids = self.all_ids
-            print('all ids:', ids)
-        else:
-            raise ValueError('Invalid flag. Please use TRAIN, VAL, TEST, or ALL.')
-
-        self.X, self.y = load_data_by_ids(self.data_path, self.label_path, ids)
-        self.X = bandpass_filter_func(self.X, fs=args.sampling_rate, lowcut=args.low_cut, highcut=args.high_cut)
-        self.X = normalize_batch_ts(self.X)
-
-        self.max_seq_len = self.X.shape[1]
-
-    def __getitem__(self, index):
-        return torch.from_numpy(self.X[index]), \
-               torch.from_numpy(np.asarray(self.y[index]))
-
-    def __len__(self):
-        return len(self.y)
+    def _postprocess_labels(self, args, flag: str):
+        """
+        Classification choice processing (same as original ADFTDLoader).
+        disease label is in self.y[:, 0]
+        """
+        if flag != 'PRETRAIN':
+            if args.classify_choice == 'ad_vs_hc':
+                pass
+            elif args.classify_choice == 'ad_vs_nonad':
+                pass
+            elif args.classify_choice == 'hc_vs_abnormal':
+                pass
+            elif args.classify_choice == 'multi_class':
+                pass

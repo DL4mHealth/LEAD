@@ -116,47 +116,143 @@ class DilatedConvEncoder(nn.Module):
 
 
 class TemporalSpatialConv(nn.Module):
-    # Initialize EEGNet
-    def __init__(self, f1, d, channels, kernel_size, dropout_rate):
-        super(TemporalSpatialConv, self).__init__()
-        # Number of spatial filters to learn within each temporal filter.
-        self.f2 = f1 * d
-        # Convolutional blocks
-        # Block 1
-        self.temporal = nn.Sequential(
-            nn.Conv2d(1, f1, (1, kernel_size), padding='same', bias=False),
-            nn.BatchNorm2d(f1),
-            nn.ELU(),
-            nn.Dropout(dropout_rate),
-        )
-        # Depthwise Conv2D
-        self.depthwise = nn.Sequential(
-            nn.Conv2d(f1, self.f2, (channels, 1), groups=f1, bias=False),
-            nn.BatchNorm2d(self.f2),
-            nn.ELU(),
-            nn.AvgPool2d((1, 4)),
-            nn.Dropout(dropout_rate)
-        )
-        # Separable Conv2D
-        self.separable = nn.Sequential(
-            nn.Conv2d(self.f2, self.f2, (1, 16), padding='same', bias=False, groups=self.f2),
-            nn.BatchNorm2d(self.f2),
-            nn.ELU(),
-            nn.AvgPool2d((1, 4)),
-            nn.Dropout(dropout_rate)
-        )
+    """
+    Input:  x of shape (B, T, C)
+    Output: y of shape (B, 128) after flattening (because of AdaptiveAvgPool2d((1, 4)) and 32 channels)
+    Pipeline:
+      1) Temporal conv along time (kernel (k_t, 1)) on layout (B, 1, T, C)
+      2) Depthwise temporal refinement
+      3) Permute to (B, 32, C, T) to do spatial (channel) conv across C
+      4) Depthwise separable conv + AdaptiveAvgPool2d((1, 4)) to make fixed spatial size
+    """
+    def __init__(self, channels: int, dropout: float = 0.5, k_t: int = 7):
+        super().__init__()
+        self.channels = channels
 
-    # Forward pass
+        # --- Temporal branch on (B, 1, T, C) ---
+        # temporal conv: kernel on time axis only (height=T axis), keep channel axis intact
+        self.temporal_conv1 = nn.Conv2d(1, 16, kernel_size=(k_t, 1), padding=(k_t // 2, 0), bias=False)   # (B,16,T,C)
+        self.bn1 = nn.BatchNorm2d(16, affine=False)
+
+        # depthwise temporal conv (refine along time), keep per-feature maps separated
+        self.temporal_conv2 = nn.Conv2d(16, 16, kernel_size=(k_t, 1), padding=(k_t // 2, 0),
+                                        bias=False, groups=16)  # (B,16,T,C)
+        self.bn2 = nn.BatchNorm2d(16, affine=False)
+        self.pool_t = nn.AdaptiveAvgPool2d((1, None))  # pool time -> 1, keep channel dim C unchanged
+        self.drop1 = nn.Dropout(dropout)
+
+        # --- Spatial (channel) branch ---
+        # After temporal pooling: (B,16,1,C). To convolve across channels, permute to (B,16,C,1)
+        # depthwise separable conv across channels (spatial):
+        self.spatial_dw = nn.Conv2d(16, 16, kernel_size=(3, 1), padding=(1, 0), bias=False, groups=16)  # (B,16,C,1)
+        self.spatial_pw = nn.Conv2d(16, 32, kernel_size=(1, 1), bias=False)                             # (B,32,C,1)
+        self.bn3 = nn.BatchNorm2d(32, affine=False)
+
+        # local mixing along channel axis (C) using 1xk conv on that axis (now height=C)
+        self.mix_conv_dw = nn.Conv2d(32, 32, kernel_size=(5, 1), padding=(2, 0), bias=False, groups=32)  # (B,32,C,1)
+        self.mix_conv_pw = nn.Conv2d(32, 32, kernel_size=(1, 1), bias=False)                             # (B,32,C,1)
+        self.bn4 = nn.BatchNorm2d(32, affine=False)
+
+        # Final pooling to fixed (1,4) so flatten -> 32*1*4 = 128
+        self.pool_final = nn.AdaptiveAvgPool2d((1, 4))
+        self.drop2 = nn.Dropout(dropout)
+
     def forward(self, x):
-        # Add channel dimension
-        x = x.unsqueeze(1)
-        # Apply blocks
-        x = self.temporal(x)
-        # print(x.shape)
-        x = self.depthwise(x)
-        # print(x.shape)
-        x = self.separable(x)
-        # print(x.shape)
-        x = x.squeeze(2)
-        # print(x.shape)
+        # x: (B, T, C)
+        B, T, C = x.shape
+
+        # --- Temporal conv on (B,1,T,C) ---
+        x = x.unsqueeze(1)                               # (B,1,T,C)
+        x = F.elu(self.bn1(self.temporal_conv1(x)))      # (B,16,T,C)
+        x = F.elu(self.bn2(self.temporal_conv2(x)))      # (B,16,T,C)
+
+        # pool time to 1 -> shape becomes (B,16,1,C)
+        x = self.pool_t(x)                               # (B,16,1,C)
+        x = self.drop1(x)
+
+        # --- Spatial conv across channels ---
+        # Move channels axis to "height" so conv kernel can scan across channel dimension
+        x = x.permute(0, 1, 3, 2).contiguous()           # (B,16,C,1)
+
+        # depthwise separable conv on channel axis
+        x = F.elu(self.bn3(self.spatial_pw(self.spatial_dw(x))))  # (B,32,C,1)
+        x = F.elu(self.bn4(self.mix_conv_pw(self.mix_conv_dw(x))))# (B,32,C,1)
+
+        # Final adaptive pooling to (1,4) over (height=C, width=1) -> output (B,32,1,4)
+        x = self.pool_final(x)                           # (B,32,1,4)
+        x = self.drop2(x)
+
+        # Flatten to (B, 128) regardless of T or C
+        x = x.view(B, -1)                                # (B, 32*1*4) = (B, 128)
         return x
+
+
+class InceptionBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_sizes,
+        bottleneck_channels,
+        activation,
+        dropout,
+    ):
+        super().__init__()
+        self.activation = activation
+        self.use_bottleneck = bottleneck_channels is not None and bottleneck_channels > 0
+
+        # 1×1 bottleneck
+        self.bottleneck = (
+            nn.Conv1d(in_channels, bottleneck_channels, kernel_size=1, bias=False)
+            if self.use_bottleneck else nn.Identity()
+        )
+        branch_in = bottleneck_channels if self.use_bottleneck else in_channels
+
+        # 每个分支输出通道数均等
+        branch_out = out_channels // len(kernel_sizes)
+        self.branches = nn.ModuleList([
+            nn.Conv1d(
+                branch_in, branch_out,
+                kernel_size=k, stride=1,
+                padding=k // 2,  # SAME padding
+                bias=False)
+            for k in kernel_sizes
+        ])
+
+        self.batch_norm = nn.BatchNorm1d(out_channels)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x):  # x: [B, C, T]
+        x = self.bottleneck(x)
+        outs = [branch(x) for branch in self.branches]          # [ [B, out_channels // num_kernels, T] for each branch ]
+        x = torch.cat(outs, dim=1)                              # [B, out_channels, T]
+        x = self.batch_norm(x)
+        x = self.activation(x)
+        x = self.drop(x)
+        return x
+
+
+class SpatialBlock(nn.Module):
+    """
+    Depthwise-Separable Spatial Block for 1D time series data.
+    """
+    def __init__(self, in_channels: int, depth_multiplier: int = 2, activation=nn.ReLU(inplace=True)):
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            in_channels, in_channels * depth_multiplier,
+            kernel_size=(1, 1), groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(
+            in_channels * depth_multiplier, in_channels,
+            kernel_size=(1, 1), bias=False)
+        self.bn = nn.BatchNorm2d(in_channels)
+        self.activation = activation
+
+    def forward(self, x):  # x: [B, C, T]  →  [B, C, 1, T]
+        x = x.unsqueeze(2)
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        x = self.activation(x)
+        return x.squeeze(2)            # back to [B, C, T]
+
+

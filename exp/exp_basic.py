@@ -1,19 +1,33 @@
 import os
 import torch
-from models import LEAD, TCN, Transformer, Conformer, TimesNet, BIOT, EEG2Rep
+from models import (ADformer, TCN, Transformer, EEGConformer, TimesNet, MedGNN, CBraMod, EEGNet, LEAD,
+                    ManualFeature, EEGInception, LEADv2, LaBraM, MNet, BIOT, iTransformer,
+                    PatchTST, ModernTCN, CSBrain)
 
 
 class Exp_Basic(object):
     def __init__(self, args):
         self.args = args
         self.model_dict = {
-            'LEAD': LEAD,
+            'ADformer': ADformer,
             'TCN': TCN,
             'Transformer': Transformer,
-            'Conformer': Conformer,
+            'EEGConformer': EEGConformer,
             'TimesNet': TimesNet,
+            'MedGNN': MedGNN,
+            'CBraMod': CBraMod,
+            'EEGNet': EEGNet,
+            'ManualFeature': ManualFeature,
+            'EEGInception': EEGInception,
             'BIOT': BIOT,
-            'EEG2Rep': EEG2Rep,
+            'PatchTST': PatchTST,
+            'ModernTCN': ModernTCN,
+            'LaBraM': LaBraM,
+            'MNet': MNet,
+            'iTransformer': iTransformer,
+            'CSBrain': CSBrain,
+            'LEAD': LEAD,
+            'LEADv2': LEADv2,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

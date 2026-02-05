@@ -87,26 +87,9 @@ class Model(nn.Module):
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def pretrain(self, x_enc, x_mark_enc):  # x_enc (batch_size, seq_length, enc_in)
-        # Data augmentation
-        x_enc = x_enc.permute(0, 2, 1)  # (batch_size, enc_in, seq_len)
-        aug_idx = random.randint(0, len(self.augmentation) - 1)
-        x_enc = self.augmentation[aug_idx](x_enc)
-        x_enc = x_enc.permute(0, 2, 1)  # (batch_size, seq_len, enc_in)
-        # Embedding
-        enc_out = self.enc_embedding(x_enc, None)
-        enc_out, attns = self.encoder(enc_out, attn_mask=None)
-
-        # Pooling
-        repr_out = enc_out.mean(dim=1).reshape(enc_out.shape[0], -1)
-        return enc_out, repr_out  # first for TS2Vec contrastive pretraining, second for linear probing
-
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
         if self.task_name == "supervised" or self.task_name == "finetune":
             dec_out = self.supervised(x_enc, x_mark_enc)
             return dec_out  # [B, N]
-        elif self.task_name == "pretrain_ts2vec":
-            repr_h, repr_z = self.pretrain(x_enc, x_mark_enc)
-            return repr_h, repr_z
         else:
             raise ValueError("Task name not recognized or not implemented within the Transformer model")

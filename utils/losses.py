@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import pdb
+from typing import Dict, Tuple
 
 
 # compute the different contrastive loss
@@ -164,7 +165,7 @@ def id_loss(z1, z2, id):
     return loss / loss_terms if loss_terms > 0 else 0
 
 
-def simclr_id_loss(z1, z2, id):
+def simclr_id_loss(z1, z2, id, lambda1=0.25, lambda2=0.75):
     '''
     Computes a contrastive loss for embeddings z1 and z2 based on the SimCLR framework and subject ID pairing.
 
@@ -202,9 +203,10 @@ def simclr_id_loss(z1, z2, id):
     # Loss terms for diagonal
     loss_diag1 = -torch.mean(torch.log(diag_elements / triu_sum))
     loss_diag2 = -torch.mean(torch.log(diag_elements / tril_sum))
-    loss = loss_diag1 + loss_diag2
-    loss_terms = 2
+    sample_loss = (loss_diag1 + loss_diag2) / 2
 
+    subject_loss = 0
+    subject_loss_terms = 0
     # Upper triangle positive pairs
     upper_mask = id_matrix[rows1, cols1].to(device)  # Ensure mask is on the correct device
     if upper_mask.any():
@@ -212,8 +214,8 @@ def simclr_id_loss(z1, z2, id):
         selected_cols = cols1[upper_mask]
         triu_elements = sim_matrix_exp[selected_rows.to(device), selected_cols.to(device)]  # Move indices to correct device
         loss_triu = -torch.mean(torch.log(triu_elements / triu_sum[selected_rows]))
-        loss += loss_triu
-        loss_terms += 1
+        subject_loss += loss_triu
+        subject_loss_terms += 1
 
     # Lower triangle positive pairs
     lower_mask = id_matrix[rows2, cols2].to(device)  # Ensure mask is on the correct device
@@ -222,10 +224,40 @@ def simclr_id_loss(z1, z2, id):
         selected_cols = cols2[lower_mask]
         tril_elements = sim_matrix_exp[selected_rows.to(device), selected_cols.to(device)]  # Move indices to correct device
         loss_tril = -torch.mean(torch.log(tril_elements / tril_sum[selected_cols]))
-        loss += loss_tril
-        loss_terms += 1
+        subject_loss += loss_tril
+        subject_loss_terms += 1
 
-    # Final loss normalization
-    return loss / loss_terms if loss_terms > 0 else 0
+    subject_loss /= subject_loss_terms  # Average over upper and lower triangle losses
+    return lambda1 * sample_loss + lambda2 * subject_loss
 
+
+def subject_ce_loss(
+    logits: torch.Tensor,            # (B, C)
+    labels: torch.Tensor,            # (B,)
+    subject_ids: torch.Tensor,       # (B,)
+    alpha: float = 1.0,              # weight for sample CE
+    beta:  float = 1.0,              # weight for subject CE
+):
+    device = logits.device
+
+    # -------- 1) sample-level CE --------
+    sample_ce = F.cross_entropy(logits, labels, reduction='mean')
+
+    # -------- 2) subject-level CE --------
+    uniq_sids = torch.unique(subject_ids)
+    subj_mean_logits, subj_labels = [], []
+    for sid in uniq_sids:
+        m = (subject_ids == sid)
+        z_mean = logits[m].mean(0)   # keep gradient here
+        lbl = labels[m][0]           # same subject → same label
+        subj_mean_logits.append(z_mean.unsqueeze(0))
+        subj_labels.append(lbl.unsqueeze(0))
+
+    subj_mean_logits = torch.cat(subj_mean_logits, dim=0)  # (S_b, C)
+    subj_labels = torch.cat(subj_labels, dim=0)            # (S_b,)
+
+    subject_ce = F.cross_entropy(subj_mean_logits, subj_labels, reduction='mean')
+
+    # -------- 3) total loss --------
+    return alpha * sample_ce + beta * subject_ce
 
