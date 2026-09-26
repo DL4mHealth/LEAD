@@ -6,6 +6,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.multiclass import OneVsRestClassifier
 
 def fit_svm(features, y, MAX_SAMPLES=10000):
     nb_classes = np.unique(y, return_counts=True)[1].shape[0]
@@ -61,10 +62,11 @@ def fit_lr(features, y, MAX_SAMPLES=100000):
         
     pipe = make_pipeline(
         StandardScaler(),
-        LogisticRegression(
-            random_state=0,
-            max_iter=1000000,
-            multi_class='ovr'
+        OneVsRestClassifier(
+            LogisticRegression(
+                random_state=0,
+                max_iter=1000000,
+            )
         )
     )
     pipe.fit(features, y)

@@ -24,7 +24,7 @@ class Model(nn.Module):
             self.dropout = nn.Dropout(configs.dropout)
             self.projection = nn.Linear(output_dims, configs.num_class)
 
-    def supervised(self, x_enc, x_mark_enc):  # (batch_size, timestamps, enc_in)
+    def supervised(self, x_enc, label_id=None):  # (batch_size, timestamps, enc_in)
         # conv encoder
         output = self.dropout(
             self.encoder(x_enc.transpose(1, 2))
@@ -38,9 +38,9 @@ class Model(nn.Module):
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised":
-            dec_out = self.supervised(x_enc, x_mark_enc)
+            dec_out = self.supervised(x_enc, label_id=label_id)
             return dec_out  # [B, N]
         else:
             raise ValueError("Task name not recognized or not implemented within the TCN model")

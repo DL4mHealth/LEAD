@@ -90,7 +90,7 @@ class Model(nn.Module):
             self.projection = nn.Linear(
                 configs.d_model * configs.seq_len, configs.num_class)
 
-    def supervised(self, x_enc, x_mark_enc):
+    def supervised(self, x_enc, label_id=None):
         # embedding
         enc_out = self.enc_embedding(x_enc, None)  # [B,T,C]
         # TimesNet
@@ -101,14 +101,13 @@ class Model(nn.Module):
         output = self.act(enc_out)
         output = self.dropout(output)
         # zero-out padding embeddings
-        output = output * x_mark_enc.unsqueeze(-1)
         # (batch_size, seq_length * d_model)
         output = output.reshape(output.shape[0], -1)
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == 'supervised':
-            dec_out = self.supervised(x_enc, x_mark_enc)
+            dec_out = self.supervised(x_enc, label_id=label_id)
             return dec_out  # [B, N]
         return None

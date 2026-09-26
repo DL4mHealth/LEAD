@@ -53,7 +53,7 @@ class Model(nn.Module):
                 nn.Linear(in_ch, configs.num_class)
             )
 
-    def supervised(self, x_enc, x_mark_enc):  # (batch_size, timestamps, enc_in)
+    def supervised(self, x_enc, label_id=None):  # (batch_size, timestamps, enc_in)
         # [B, C, T]
         x = self.permute_in(x_enc)
         x = self.feature_extractor(x)
@@ -64,9 +64,9 @@ class Model(nn.Module):
 
         return output                     # [B, num_class]
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == 'supervised':
-            dec_out = self.supervised(x_enc, x_mark_enc)
+            dec_out = self.supervised(x_enc, label_id=label_id)
             return dec_out  # [B, N]
         else:
             raise ValueError("Task name not recognized or not implemented within the EEGInception Model")

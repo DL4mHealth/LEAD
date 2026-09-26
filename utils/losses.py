@@ -227,8 +227,34 @@ def simclr_id_loss(z1, z2, id, lambda1=0.25, lambda2=0.75):
         subject_loss += loss_tril
         subject_loss_terms += 1
 
-    subject_loss /= subject_loss_terms  # Average over upper and lower triangle losses
+    if subject_loss_terms > 0:
+        subject_loss = subject_loss / subject_loss_terms
+    else:
+        # A batch may contain a subject with only one sample (for example a
+        # dataset tail). Keep the objective finite instead of dividing by zero.
+        subject_loss = z1.new_tensor(0.0)
     return lambda1 * sample_loss + lambda2 * subject_loss
+
+
+def soft_voting_loss(logits, labels, subject_ids, alpha=1.0, beta=1.0):
+    # 1) sample-level
+    sample_loss = F.cross_entropy(logits, labels)
+
+    # 2) subject-level (soft voting)
+    probs = logits.softmax(dim=-1)                # (N, C)
+    loss_subj, n_subj = 0.0, 0
+    for sid in torch.unique(subject_ids):
+        m = subject_ids == sid
+        subj_prob = probs[m].mean(0, keepdim=True)   # (1, C)
+        subj_label = labels[m][0].unsqueeze(0)       # assume same label
+        loss_subj += F.cross_entropy(subj_prob, subj_label)
+        n_subj += 1
+    loss_subj /= max(n_subj, 1)
+
+    return alpha * sample_loss + beta * loss_subj
+
+
+ProtoDict = Dict[int, Tuple[torch.Tensor, int]]
 
 
 def subject_ce_loss(

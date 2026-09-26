@@ -119,17 +119,17 @@ class Model(nn.Module):
         x = x.reshape(B, -1)
         return x
 
-    def supervised(self, x_enc, x_mark_enc):
+    def supervised(self, x_enc, label_id=None):
         """
         x_enc: (B, T, C)
-        x_mark_enc: unused
+        label_id: optional LEAD-format metadata; unused by MNet
         """
         feat = self._forward_conv(x_enc)
         logits = self.fc(feat)
         return logits
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == 'supervised':
-            return self.supervised(x_enc, x_mark_enc)
+            return self.supervised(x_enc, label_id=label_id)
         else:
             raise ValueError("Unsupported task for this simplified MNet model.")

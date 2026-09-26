@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 from math import sqrt
 from utils.masking import TriangularCausalMask, ProbMask
-from reformer_pytorch import LSHSelfAttention
 from einops import rearrange, repeat
 
 
@@ -74,112 +73,76 @@ class AttentionLayer(nn.Module):
         return self.out_projection(out), attn
 
 
-class LEADLayerV2(nn.Module):
-    '''
-    Gated Temporal & Spatial attentions in parallel
-    '''
+class LEADLayer(nn.Module):
+    """Gated temporal and spatial attention on a runtime C x P token grid."""
+
     def __init__(
         self,
         d_model: int,
-        enc_in: int,              # C
         n_heads: int,
-        patch_num: int,   # P
         dropout: float = 0.1,
         output_attention: bool = False,
     ):
         super().__init__()
-        self.patch_num = patch_num  # P
         self.d_model = d_model
-        self.enc_in = enc_in                        # C
         self.output_attention = output_attention
 
-        # Temporal attention (per-channel)
         self.temporal_attention = AttentionLayer(
             FullAttention(False, factor=1, attention_dropout=dropout, output_attention=output_attention),
             d_model, n_heads
         )
-        # Spatial attention (per-patch across channels)
         self.spatial_attention = AttentionLayer(
             FullAttention(False, factor=1, attention_dropout=dropout, output_attention=output_attention),
             d_model, n_heads
         )
-
-        # Optional norms (pre-norm style)
         self.t_norm = nn.LayerNorm(d_model)
         self.c_norm = nn.LayerNorm(d_model)
+        self.fuse_proj = nn.Linear(2 * d_model, d_model)
+        nn.init.xavier_uniform_(self.fuse_proj.weight)
+        nn.init.zeros_(self.fuse_proj.bias)
 
-        # Fusion projection: map concatenated [x_t, x_c] to D-dim
-        self.fuse_proj = nn.Linear(2 * d_model, d_model)  # Map [x_t, x_c] concat to D-dim
-        nn.init.xavier_uniform_(self.fuse_proj.weight)  # Xavier init for stability
-        nn.init.zeros_(self.fuse_proj.bias)  # Bias init to 0
-
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
-        '''
-        x: [B, C*P, D]
-        returns:
-            x_next:        [B, C*P, D]
-            'attn_t':   ...,
-            'attn_c':   ...,
-            }
-        '''
+    def forward(
+        self,
+        x,
+        num_channels,
+        num_patches,
+        attn_mask=None,
+        tau=None,
+        delta=None,
+    ):
+        """
+        Args:
+            x: [B, C*P, D]
+            num_channels: runtime C for the current homogeneous batch/sub-grid
+            num_patches: runtime P for the current homogeneous batch/sub-grid
+        """
         B, C_P, D = x.shape
-        C, P = self.enc_in, int(C_P // self.enc_in)
-        assert C_P == C * P and D == self.d_model, "Shape mismatch: expect [B, C*P, D]"
+        C, P = int(num_channels), int(num_patches)
+        if C_P != C * P or D != self.d_model:
+            raise ValueError(
+                f"LEADLayer shape mismatch: x={tuple(x.shape)}, C={C}, P={P}, "
+                f"d_model={self.d_model}."
+            )
 
-        # -------------------- Temporal branch --------------------
-        # [B, C*P, D] -> [B*C, P, D]
-        x_t = rearrange(x, 'b (c n) d -> (b c) n d', b=B, c=C, n=P)
+        x_t = rearrange(x, "b (c n) d -> (b c) n d", b=B, c=C, n=P)
         x_t = self.t_norm(x_t)
-        # temporal attention
-        x_t_out, attn_t = self.temporal_attention(x_t, x_t, x_t,
-                                                  attn_mask=None, tau=tau, delta=delta)  # [B*C, P, D]
-        x_t_out = rearrange(x_t_out, '(b c) n d -> b (c n) d', b=B, c=C)  # [B, C*P, D]
+        x_t_out, attn_t = self.temporal_attention(
+            x_t, x_t, x_t, attn_mask=None, tau=tau, delta=delta
+        )
+        x_t_out = rearrange(x_t_out, "(b c) n d -> b (c n) d", b=B, c=C)
 
-        # -------------------- Spatial branch --------------------
-        # [B, C*P, D] -> [B*P, C, D]
-        x_c = rearrange(x, 'b (c n) d -> (b n) c d', b=B, c=C, n=P)
+        x_c = rearrange(x, "b (c n) d -> (b n) c d", b=B, c=C, n=P)
         x_c = self.c_norm(x_c)
-        # spatial attention
-        x_c_out, attn_c = self.spatial_attention(x_c, x_c, x_c,
-                                                 attn_mask=None, tau=tau, delta=delta)  # [B*P, C, D]
-        x_c_out = rearrange(x_c_out, '(b n) c d -> b (c n) d', b=B, n=P)  # [B, C*P, D]
+        x_c_out, attn_c = self.spatial_attention(
+            x_c, x_c, x_c, attn_mask=None, tau=tau, delta=delta
+        )
+        x_c_out = rearrange(x_c_out, "(b n) c d -> b (c n) d", b=B, n=P)
 
-        # -------------------- Merge token streams --------------------
-        gate = torch.sigmoid(self.fuse_proj(torch.cat([x_t_out, x_c_out], dim=-1)))  # [B, C*P, D]
-        x_next = gate * x_t_out + (1.0 - gate) * x_c_out  # [B, C*P, D]
-
+        gate = torch.sigmoid(self.fuse_proj(torch.cat([x_t_out, x_c_out], dim=-1)))
+        x_next = gate * x_t_out + (1.0 - gate) * x_c_out
         return x_next, attn_t, attn_c
 
 
-class LEADLayer(nn.Module):
-    def __init__(
-        self,
-        d_model,
-        n_heads,
-        dropout=0.1,
-        output_attention=False,
-    ):
-        super().__init__()
-
-        # Temporal attention among cross channel patch embeddings
-        self.temporal_attention = AttentionLayer(
-            FullAttention(False, factor=1, attention_dropout=dropout, output_attention=output_attention),
-            d_model, n_heads
-        )
-
-        # Spatial attention among up-scaled channel embeddings
-        self.spatial_attention = AttentionLayer(
-            FullAttention(False, factor=1, attention_dropout=dropout, output_attention=output_attention),
-            d_model, n_heads
-        )
-
-    def forward(self, x_t, x_s, attn_mask=None, tau=None, delta=None):
-        # Temporal attention
-        x_out_t, attn_t = self.temporal_attention(x_t, x_t, x_t, attn_mask=attn_mask, tau=tau, delta=delta)
-        # Spatial attention
-        x_out_s, attn_s = self.spatial_attention(x_s, x_s, x_s, attn_mask=attn_mask, tau=tau, delta=delta)
-
-        return x_out_t, x_out_s, attn_t, attn_s
 
 
 class ADformerLayer(nn.Module):

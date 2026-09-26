@@ -169,7 +169,7 @@ class Model(nn.Module):
             x = F.pad(x, (0, 0, 0, pad_len))  # pad along seq_length dim
         return x
 
-    def supervised(self, x_enc, x_mark_enc):  # x_enc (batch_size, seq_length, enc_in)
+    def supervised(self, x_enc, label_id=None):  # x_enc (batch_size, seq_length, enc_in)
         # padding and channel mapping for loading CBraMod weights
         x_enc = self.pad_to_multiple(x_enc, multiple=200)  # pad to multiple of 200
         x_enc = self.channel_mapping(x_enc.permute(0, 2, 1))  # map to 19 channels (batch_size, 19, seq_length)
@@ -180,9 +180,9 @@ class Model(nn.Module):
         out = self.classifier(feats)
         return out
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised" or self.task_name == "finetune":
-            output = self.supervised(x_enc, x_mark_enc)
+            output = self.supervised(x_enc, label_id=label_id)
             return output
         else:
-            raise ValueError("Task name not recognized or not implemented within the LEAD model")
+            raise ValueError("Task name not recognized or not implemented within the CBraMod model")

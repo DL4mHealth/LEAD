@@ -10,7 +10,7 @@ class LayerNorm(nn.Module):
 
     def __init__(self, channels, eps=1e-6, data_format="channels_last"):
         super(LayerNorm, self).__init__()
-        self.norm = nn.Layernorm(channels)
+        self.norm = nn.LayerNorm(channels)
 
     def forward(self, x):
 
@@ -86,20 +86,20 @@ class ReparamLargeKernelConv(nn.Module):
         else:
             out = self.lkb_origin(inputs)
             if hasattr(self, 'small_conv'):
-                out += self.small_conv(inputs)
+                out = out + self.small_conv(inputs)
         return out
 
-    def PaddingTwoEdge1d(self,x,pad_length_left,pad_length_right,pad_values=0):
-
-        D_out,D_in,ks=x.shape
-        if pad_values ==0:
-            pad_left = torch.zeros(D_out,D_in,pad_length_left)
-            pad_right = torch.zeros(D_out,D_in,pad_length_right)
+    def PaddingTwoEdge1d(self, x, pad_length_left, pad_length_right, pad_values=0):
+        """Pad a Conv1d kernel on the same device/dtype as the kernel tensor."""
+        d_out, d_in, _ = x.shape
+        if pad_values == 0:
+            pad_left = x.new_zeros(d_out, d_in, pad_length_left)
+            pad_right = x.new_zeros(d_out, d_in, pad_length_right)
         else:
-            pad_left = torch.ones(D_out, D_in, pad_length_left) * pad_values
-            pad_right = torch.ones(D_out, D_in, pad_length_right) * pad_values
-        x = torch.cat([pad_left,x],dims=-1)
-        x = torch.cat([x,pad_right],dims=-1)
+            pad_left = x.new_full((d_out, d_in, pad_length_left), pad_values)
+            pad_right = x.new_full((d_out, d_in, pad_length_right), pad_values)
+        x = torch.cat([pad_left, x], dim=-1)
+        x = torch.cat([x, pad_right], dim=-1)
         return x
 
     def get_equivalent_kernel_bias(self):
@@ -254,22 +254,25 @@ class ModernTCN(nn.Module):
         patch_num = seq_len // patch_stride
         self.n_vars = c_in
         self.individual = individual
-        d_model = dims[self.num_stage-1]
+        d_model = dims[self.num_stage - 1]
 
-
-        if use_multi_scale:
-            self.head_nf = d_model * patch_num
-            self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window,
-                                     head_dropout=head_dropout)
-        else:
-            if patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
-                self.head_nf = d_model * patch_num // pow(downsample_ratio,(self.num_stage - 1))
+        self.head = None
+        if self.task_name != 'supervised':
+            if use_multi_scale:
+                self.head_nf = d_model * patch_num
             else:
-                self.head_nf = d_model * (patch_num // pow(downsample_ratio, (self.num_stage - 1))+1)
+                if patch_num % pow(downsample_ratio, (self.num_stage - 1)) == 0:
+                    self.head_nf = d_model * patch_num // pow(downsample_ratio, (self.num_stage - 1))
+                else:
+                    self.head_nf = d_model * (patch_num // pow(downsample_ratio, (self.num_stage - 1)) + 1)
 
-
-            self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window,
-                                     head_dropout=head_dropout)
+            self.head = Flatten_Head(
+                self.individual,
+                self.n_vars,
+                self.head_nf,
+                target_window,
+                head_dropout=head_dropout,
+            )
 
         with torch.no_grad():
             dummy = torch.zeros(1, nvars, seq_len)
@@ -279,7 +282,6 @@ class ModernTCN(nn.Module):
         if self.task_name == 'supervised':
             self.act_class = F.gelu
             self.class_dropout = nn.Dropout(self.class_drop)
-
             self.head_class = nn.Linear(self.n_fc_in, self.class_num)
 
     def forward_feature(self, x, te=None):
@@ -354,9 +356,9 @@ class Model(nn.Module):
 
         self.freq = configs.freq
         self.seq_len = configs.seq_len
-        self.c_in = self.nvars,
+        self.c_in = self.nvars
         self.individual = 0
-        self.target_window = configs.pred_len
+        self.target_window = getattr(configs, "pred_len", 0)
 
         self.kernel_size = 25
         self.patch_size = configs.patch_len
@@ -394,15 +396,18 @@ class Model(nn.Module):
                                class_drop=self.class_dropout,
                                class_num=self.class_num)
 
-    def supervised(self, x, x_mark_enc):  # (batch_size, timestamps, enc_in)
-        x = x.permute(0, 2, 1)
+    def supervised(self, x, label_id=None):  # (batch_size, timestamps, enc_in)
+        # Project convention is [B, T, C], while ModernTCN expects [B, C, T].
+        # Keep the tensor contiguous after permutation so DataParallel replicas
+        # never hit view/reshape issues on non-contiguous shards.
+        x = x.permute(0, 2, 1).contiguous()
         te = None
         x = self.model(x, te)
         return x
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised":
-            dec_out = self.supervised(x_enc, x_mark_enc)
+            dec_out = self.supervised(x_enc, label_id=label_id)
             return dec_out  # [B, N]
         else:
             raise ValueError("Task name not recognized or not implemented within the TCN model")

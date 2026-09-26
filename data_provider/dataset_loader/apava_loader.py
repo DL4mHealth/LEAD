@@ -36,12 +36,11 @@ def get_id_list_apava(args, data_list: np.ndarray, a=0.6, b=0.8):
     hc_list = list(data_list[np.where(data_list[:, 0] == 0)][:, 1])  # healthy IDs
     ad_list = list(data_list[np.where(data_list[:, 0] == 1)][:, 1])  # Alzheimer's disease IDs
     if args.cross_val == 'fixed' or args.cross_val == 'mccv':  # fixed split
-        if args.cross_val == 'fixed':
-            val_ids = [15, 16, 19, 20]  # 15, 19 are AD; 16, 20 are HC
-            test_ids = [1, 2, 17, 18]  # 1, 17 are AD; 2, 18 are HC
-            train_ids = [int(i) for i in all_ids if i not in val_ids + test_ids]
-        else:
-            raise NotImplementedError('MCCV not implemented yet for APAVA dataset.')
+        val_ids = [15, 16, 19, 20]  # 15, 19 are AD; 16, 20 are HC
+        test_ids = [1, 2, 17, 18]  # 1, 17 are AD; 2, 18 are HC
+        train_ids = [int(i) for i in all_ids if i not in val_ids + test_ids]
+        if args.cross_val == 'mccv':
+            print('MCCV not implemented for APAVA dataset, change to fixed split.')
 
         return sorted(all_ids), sorted(train_ids), sorted(val_ids), sorted(test_ids)
 

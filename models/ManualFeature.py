@@ -10,23 +10,45 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
-        self.sampling_rate = list(map(int, configs.sampling_rate_list.split(",")))[0]
+        sampling_rate_arg = str(getattr(configs, "sampling_rate_list", "all")).strip().lower()
+        if sampling_rate_arg in {"", "all", "none"}:
+            self.sampling_rate = None
+        else:
+            self.sampling_rate = int(sampling_rate_arg.split(",")[0])
 
         self.encoder = feature_extractor
 
         if self.task_name == 'supervised':
             self.projection = nn.Linear(configs.enc_in*31, configs.num_class)
 
-    def supervised(self, x_enc, x_mark_enc):
-        enc_out = self.encoder(x_enc, fs=self.sampling_rate)  # (batch_size, features, enc_in)
-        enc_out = enc_out.reshape(enc_out.shape[0], -1)  # (batch_size, features * enc_in)
+    def supervised(self, x_enc, label_id=None):
+        # Manual spectral features depend on the physical sampling rate. Use
+        # label_id[:, 2] so mixed-rate downstream batches remain correct.
+        if label_id is None:
+            if self.sampling_rate is None:
+                raise ValueError(
+                    "ManualFeature requires label_id[:, 2] when --sampling_rate_list=all."
+                )
+            enc_out = self.encoder(x_enc, fs=self.sampling_rate)
+        else:
+            fs_values = label_id[:, 2].long().to(x_enc.device)
+            feature_parts = []
+            index_parts = []
+            for fs in torch.unique(fs_values, sorted=True):
+                indices = torch.nonzero(fs_values == fs, as_tuple=False).squeeze(1)
+                feature_parts.append(self.encoder(x_enc.index_select(0, indices), fs=int(fs.item())))
+                index_parts.append(indices)
+            merged_features = torch.cat(feature_parts, dim=0)
+            merged_indices = torch.cat(index_parts, dim=0)
+            restore_order = torch.argsort(merged_indices)
+            enc_out = merged_features.index_select(0, restore_order)
 
-        output = self.projection(enc_out)  # (batch_size, num_classes)
-        return output
+        enc_out = enc_out.reshape(enc_out.shape[0], -1)
+        return self.projection(enc_out)
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised":
-            dec_out = self.supervised(x_enc, x_mark_enc)
+            dec_out = self.supervised(x_enc, label_id=label_id)
             return dec_out  # [B, N]
         else:
             raise ValueError("Task name not recognized or not implemented within the ManualFeature model")

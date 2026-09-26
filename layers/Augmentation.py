@@ -21,22 +21,8 @@ class Flip(nn.Module):
         self.prob = prob
 
     def forward(self, x):
-        if self.training and torch.rand(1) < self.prob:
+        if self.training and torch.rand(1, device=x.device) < self.prob:
             return torch.flip(x, [-1])
-        return x
-
-
-class Shuffle(nn.Module):
-    # shuffle channels order
-    def __init__(self, prob=0.5):
-        super().__init__()
-        self.prob = prob
-
-    def forward(self, x):
-        if self.training and torch.rand(1) < self.prob:
-            B, C, T = x.shape
-            perm = torch.randperm(C)
-            return x[:, perm, :]
         return x
 
 
@@ -50,7 +36,7 @@ class TemporalMask(nn.Module):
         if self.training:
             B, C, T = x.shape
             num_mask = int(T * self.ratio)
-            mask_indices = torch.randperm(T)[:num_mask]
+            mask_indices = torch.randperm(T, device=x.device)[:num_mask]
             x[:, :, mask_indices] = 0
         return x
 
@@ -65,7 +51,7 @@ class ChannelMask(nn.Module):
         if self.training:
             B, C, T = x.shape
             num_mask = int(C * self.ratio)
-            mask_indices = torch.randperm(C)[:num_mask]
+            mask_indices = torch.randperm(C, device=x.device)[:num_mask]
             x[:, mask_indices, :] = 0
         return x
 
@@ -90,7 +76,7 @@ class PatchMask(nn.Module):
             num_mask = int(total_units * self.ratio)  # number of patches to mask
 
             # select random (channel, patch_index)
-            idx = torch.randperm(total_units)[:num_mask].to(x.device)
+            idx = torch.randperm(total_units, device=x.device)[:num_mask]
             ch_indices = idx // num_patches
             p_indices = idx % num_patches
 
@@ -135,10 +121,6 @@ def get_augmentation(augmentation, patch_len=25):
         if len(augmentation) == 4:
             return Flip()
         return Flip(float(augmentation[4:]))
-    elif augmentation.startswith("shuffle"):
-        if len(augmentation) == 7:
-            return Shuffle()
-        return Shuffle(float(augmentation[7:]))
     elif augmentation.startswith("frequency"):
         if len(augmentation) == 9:
             return FrequencyMask()

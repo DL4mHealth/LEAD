@@ -56,13 +56,50 @@ class BaseLoader(Dataset):
         with open(meta_path, 'r') as f:
             meta = json.load(f)
 
+        self.meta = meta
+        self.dataset_name = os.path.basename(os.path.normpath(root_path))
         self.N = int(meta["N"])
         self.T = int(meta["T"])
         self.C = int(meta["C"])
+        self.montage = meta.get("MONTAGE", None)
+        self.channels = list(meta.get("CHANNELS", []))
+        self.sample_rate_list = [int(v) for v in meta.get("SAMPLE_RATE_LIST", [])]
+
+        if not self.montage:
+            raise ValueError(f"{self.dataset_name}: MONTAGE is required in meta.json.")
+        if not self.channels:
+            raise ValueError(f"{self.dataset_name}: CHANNELS is required in meta.json.")
+        if len(self.channels) != self.C:
+            raise ValueError(
+                f"{self.dataset_name}: meta.json C={self.C}, but "
+                f"len(CHANNELS)={len(self.channels)}."
+            )
         self.X_path = os.path.join(root_path, 'X.dat')
         self.y_path = os.path.join(root_path, 'y.dat')
 
-        # ------ open memmaps ------
+        # ------ validate and open memmaps ------
+        if not os.path.exists(self.X_path):
+            raise FileNotFoundError(f"X.dat not found at {self.X_path}")
+        if not os.path.exists(self.y_path):
+            raise FileNotFoundError(f"y.dat not found at {self.y_path}")
+
+        expected_x_bytes = self.N * self.T * self.C * np.dtype(np.float32).itemsize
+        expected_y_bytes = self.N * 3 * np.dtype(np.float32).itemsize
+        actual_x_bytes = os.path.getsize(self.X_path)
+        actual_y_bytes = os.path.getsize(self.y_path)
+        if actual_x_bytes != expected_x_bytes:
+            raise ValueError(
+                f"{self.dataset_name}: X.dat size mismatch. Expected float32 shape "
+                f"({self.N}, {self.T}, {self.C}) = {expected_x_bytes} bytes, "
+                f"got {actual_x_bytes} bytes."
+            )
+        if actual_y_bytes != expected_y_bytes:
+            raise ValueError(
+                f"{self.dataset_name}: y.dat must be float32 with shape ({self.N}, 3) "
+                f"and columns [disease_label, subject_id, sampling_rate]. "
+                f"Expected {expected_y_bytes} bytes, got {actual_y_bytes} bytes."
+            )
+
         self.X_mem = np.memmap(self.X_path, dtype=np.float32, mode='r',
                                shape=(self.N, self.T, self.C))
         y_mem = np.memmap(self.y_path, dtype=np.float32, mode='r',
@@ -111,7 +148,11 @@ class BaseLoader(Dataset):
         self.y = np.asarray(y_mem[self.indices])   # shape: (N_sel, 3)
 
         # ------ sampling rate filtering ------
-        sampling_rate_list = list(map(int, args.sampling_rate_list.split(",")))
+        sampling_rate_arg = str(getattr(args, "sampling_rate_list", "all")).strip().lower()
+        if sampling_rate_arg in ("", "all", "none"):
+            sampling_rate_list = sorted(np.unique(self.y[:, 2].astype(int)).tolist())
+        else:
+            sampling_rate_list = list(map(int, sampling_rate_arg.split(",")))
         sampling_mask = np.isin(self.y[:, 2], sampling_rate_list)
         if sampling_mask.sum() == 0:
             print("Unique sampling rate in data:", np.unique(self.y[:, 2]))
@@ -124,8 +165,29 @@ class BaseLoader(Dataset):
         # subclass make modification based on classify_choice to further process self.y and self.indices
         self._postprocess_labels(args, flag)
 
-        # ------ max sequence length ------
+        # ------ dataset metadata / compatibility fields ------
+        if not self.sample_rate_list:
+            self.sample_rate_list = sorted(np.unique(self.y[:, 2].astype(int)).tolist())
         self.max_seq_len = self.T
+        self.seq_len = self.T
+        self.num_channels = self.C
+        self.enc_in = self.C
+        self.num_class = int(len(np.unique(self.y[:, 0])))
+        self.dataset_metadata = {
+            "dataset_name": self.dataset_name,
+            "N": self.N,
+            "T": self.T,
+            "C": self.C,
+            "montage": self.montage,
+            "channels": self.channels,
+            "sample_rate_list": self.sample_rate_list,
+            "labels": meta.get("LABELS", {}),
+        }
+
+        print(
+            f"[{self.dataset_name}] flag={self.flag}, trials={len(self.indices)}, "
+            f"subjects={len(ids)}, T={self.T}, C={self.C}, montage={self.montage}"
+        )
 
     # --------------- Two interfaces for subclass ---------------
 
@@ -160,7 +222,10 @@ class BaseLoader(Dataset):
             # normalize_batch_ts expects shape (B, T, C)
             x_np = normalize_batch_ts(x_np[np.newaxis, ...])[0]
 
-        x = torch.from_numpy(np.asarray(x_np, dtype=np.float32))
-        y = torch.from_numpy(np.asarray(y_np, dtype=np.float32))
+        # Memmaps opened read-only produce non-writable NumPy views. Copy the
+        # selected sample before converting to torch to avoid undefined behavior
+        # if a downstream transform ever writes in-place.
+        x = torch.from_numpy(np.array(x_np, dtype=np.float32, copy=True))
+        y = torch.from_numpy(np.array(y_np, dtype=np.float32, copy=True))
 
         return x, y

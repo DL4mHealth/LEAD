@@ -83,7 +83,7 @@ class Model(nn.Module):
                 configs.num_class,
             )
 
-    def supervised(self, x_enc, x_mark_enc):
+    def supervised(self, x_enc, label_id=None):
         # Embedding
         enc_out_t, enc_out_c = self.enc_embedding(x_enc)
         enc_out_t, enc_out_c, attns_t, attns_c = self.encoder(enc_out_t, enc_out_c, attn_mask=None)
@@ -102,9 +102,9 @@ class Model(nn.Module):
         output = self.classifier(output)  # (batch_size, num_classes)
         return output
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised":
-            output = self.supervised(x_enc, x_mark_enc)
+            output = self.supervised(x_enc, label_id=label_id)
             return output
         else:
             raise ValueError("Task name not recognized or not implemented within the ADformer model")

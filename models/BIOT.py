@@ -198,7 +198,7 @@ class Model(nn.Module):
             print('Unexpected keys:', unexpected_keys)
             print(f"Loading model successful at {model_path}")
 
-    def supervised(self, x_enc, x_mark_enc):  # x_enc (batch_size, seq_length, enc_in)
+    def supervised(self, x_enc, label_id=None):  # x_enc (batch_size, seq_length, enc_in)
         if x_enc.size(1) < 200:  # some dataset may be shorter than 200 time points
             pad_len = 200 - x_enc.size(1)
             # pad on the second last dimension right side
@@ -208,9 +208,9 @@ class Model(nn.Module):
         out = self.model(enc_out)
         return out
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised":
-            output = self.supervised(x_enc, x_mark_enc)
+            output = self.supervised(x_enc, label_id=label_id)
             return output
         else:
             raise ValueError("Task name not recognized or not implemented within the BIOT model")

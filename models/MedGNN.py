@@ -11,6 +11,7 @@ from layers.Difference_Pre import DifferenceDataEmb, DataRestoration
 class Model(nn.Module):
     def __init__(self, configs):
         super(Model, self).__init__()
+        self.task_name = configs.task_name
         self.enc_in = configs.enc_in
         self.seq_len = configs.seq_len
         self.d_model = configs.d_model
@@ -86,8 +87,7 @@ class Model(nn.Module):
         # step 5: projection
         self.projection = nn.Linear(self.d_model * self.enc_in, configs.num_class)
 
-
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def supervised(self, x_enc, label_id=None):
         B, T, C = x_enc.shape
 
         # step1: multi_resolution_data
@@ -114,3 +114,10 @@ class Model(nn.Module):
         output = self.projection(output)
 
         return output
+
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
+        if self.task_name == "supervised":
+            dec_out = self.supervised(x_enc, label_id=label_id)
+            return dec_out  # [B, N]
+        else:
+            raise ValueError("Task name not recognized or not implemented within the MedGNN model")

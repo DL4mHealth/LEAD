@@ -1,109 +1,11 @@
 import torch
 import torch.nn as nn
 import math
+import os
+import torch.nn.functional as F
 
 from layers.CSBrain_Layer import *
 
-
-"""class Model(nn.Module):
-    def __init__(self, param):
-        super(Model, self).__init__()
-
-        electrode_labels = [
-            'Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2',
-            'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 'Fz', 'Cz', 'Pz'
-        ]
-
-        # Brain region encoding
-        brain_regions = [0, 0, 0, 0, 4, 4, 1, 1, 3, 3, 0, 0, 2, 2, 2, 2, 0, 4, 1]
-
-        # Topological structure
-        topology = {
-            0: ['Fp1', 'F7', 'F3', 'Fz', 'F4', 'F8', 'Fp2'],
-            1: ['P3', 'Pz', 'P4'],
-            2: ['T5', 'T3', 'T4', 'T6'],
-            3: ['O1', 'O2'],
-            4: ['C3', 'Cz', 'C4']
-        }
-
-        # Group electrode indices by brain region
-        region_groups = {}
-        for i, region in enumerate(brain_regions):
-            if region not in region_groups:
-                region_groups[region] = []
-            region_groups[region].append((i, electrode_labels[i]))
-
-        # Sort based on topology
-        sorted_indices = []
-        for region in sorted(region_groups.keys()):
-            region_electrodes = region_groups[region]
-            sorted_electrodes = sorted(region_electrodes, key=lambda x: topology[region].index(x[1]))
-            sorted_indices.extend([e[0] for e in sorted_electrodes])
-
-        print("Sorted Indices:", sorted_indices)
-
-        if param.model == 'CSBrain':
-            self.backbone = CSBrain(
-                in_dim=200, out_dim=200, d_model=200,
-                dim_feedforward=800, seq_len=30,
-                n_layer=param.n_layer, nhead=8,
-                brain_regions=brain_regions,
-                sorted_indices=sorted_indices
-            )
-        else:
-            return 0
-
-        if param.use_pretrained_weights:
-            map_location = torch.device(f'cuda:{param.cuda}')
-            state_dict = torch.load(param.foundation_dir, map_location=map_location)
-            # Remove "module." prefix
-            new_state_dict = {key.replace("module.", ""): value for key, value in state_dict.items()}
-
-            model_state_dict = self.backbone.state_dict()
-
-            # Filter matching weights by shape
-            matching_dict = {k: v for k, v in new_state_dict.items() if
-                             k in model_state_dict and v.size() == model_state_dict[k].size()}
-
-            model_state_dict.update(matching_dict)
-            self.backbone.load_state_dict(model_state_dict)
-
-        self.backbone.proj_out = nn.Sequential()
-        self.classifier = nn.Sequential(
-            nn.Linear(19 * 5 * 200, 5 * 200),
-            nn.ELU(),
-            nn.Dropout(param.dropout),
-            nn.Linear(5 * 200, 200),
-            nn.ELU(),
-            nn.Dropout(param.dropout),
-            nn.Linear(200, 1)
-        )
-
-    def forward(self, x):
-        bz, ch_num, seq_len, patch_size = x.shape
-        feats = self.backbone(x)
-        feats = feats.contiguous().view(bz, ch_num * seq_len * 200)
-        print(feats.shape)
-        out = self.classifier(feats)
-        out = out[:, 0]
-        return out
-
-
-if __name__ == "__main__":
-    class Param:
-        def __init__(self):
-            self.model = 'CSBrain'
-            self.n_layer = 12
-            self.use_pretrained_weights = True
-            self.foundation_dir = '../checkpoints/CSBrain/pretrain_csbrain/CSBrain/CSBrain.pth'
-            self.cuda = 0
-            self.dropout = 0.1
-
-    param = Param()
-    model = Model(param)
-    x = torch.randn(8, 19, 5, 200)  # Example input
-    out = model(x)
-    print(out.shape)  # Should print torch.Size([2])"""
 
 TOPOLOGY = {
     0: ['Fp1', 'F7', 'F3', 'Fz', 'F4', 'F8', 'Fp2'],
@@ -111,7 +13,45 @@ TOPOLOGY = {
     2: ['P7', 'T7', 'T8', 'P8'],
     3: ['O1', 'O2'],
     4: ['C3', 'Cz', 'C4']
-}  # You need to manually define the topology for each brain region of different datasets
+}
+
+
+def build_csbrain_channel_layout(channel_names, brain_regions):
+    """Validate meta-driven channel order and build CSBrain sorted indices.
+
+    ``brain_regions`` remains user/config controlled to preserve the original
+    CSBrain setup. Channel names themselves come from meta.json. Legacy 10-20
+    temporal names are normalized only for topology lookup.
+    """
+    if len(channel_names) != len(brain_regions):
+        raise ValueError(
+            f"CSBrain requires one brain-region label per channel: "
+            f"got {len(channel_names)} channels and {len(brain_regions)} region labels."
+        )
+
+    legacy_alias = {"T3": "T7", "T4": "T8", "T5": "P7", "T6": "P8"}
+    region_groups = {}
+    for index, (channel, region) in enumerate(zip(channel_names, brain_regions)):
+        if region not in TOPOLOGY:
+            raise ValueError(
+                f"CSBrain region {region} is undefined. Available regions: {sorted(TOPOLOGY)}."
+            )
+        canonical_channel = legacy_alias.get(channel, channel)
+        if canonical_channel not in TOPOLOGY[region]:
+            raise ValueError(
+                f"CSBrain channel '{channel}' (mapped to '{canonical_channel}') is not "
+                f"listed in topology region {region}. Check --brain_regions against "
+                f"meta.json CHANNELS order."
+            )
+        region_groups.setdefault(region, []).append((index, canonical_channel))
+
+    sorted_indices = []
+    for region in sorted(region_groups):
+        region_electrodes = sorted(
+            region_groups[region], key=lambda item: TOPOLOGY[region].index(item[1])
+        )
+        sorted_indices.extend(index for index, _ in region_electrodes)
+    return sorted_indices
 
 
 class Model(nn.Module):
@@ -121,29 +61,26 @@ class Model(nn.Module):
             'Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T7', 'C3', 'Cz',
             'C4', 'T8', 'P7', 'P3', 'Pz', 'P4', 'P8', 'O1', 'O2'
         ]"""
-        channel_names = configs.channel_names.split(",")
+        channel_names_by_id = dict(getattr(configs, "channel_names_by_id", {}))
+        if len(channel_names_by_id) != 1:
+            raise ValueError(
+                "CSBrain downstream evaluation expects exactly one dataset so channel names "
+                "can be read automatically from meta.json."
+            )
+        channel_names = list(next(iter(channel_names_by_id.values())))
         if len(channel_names) != configs.enc_in:
-            raise ValueError("channel_names length does not match enc_in")
+            raise ValueError("meta.json CHANNELS length does not match enc_in for CSBrain")
         # Brain region encoding
         # brain_regions = [0, 0, 0, 0, 0, 0, 0, 2, 4, 4, 4, 2, 2, 1, 1, 1, 2, 3, 3]
         brain_regions = list(map(int, configs.brain_regions.split(",")))
         if len(brain_regions) != configs.enc_in:
-            raise ValueError("brain_regions length does not match enc_in")
-        # Group electrode indices by brain region
-        region_groups = {}
-        for i, region in enumerate(brain_regions):
-            if region not in region_groups:
-                region_groups[region] = []
-            region_groups[region].append((i, channel_names[i]))
-
-        # Sort based on topology
-        sorted_indices = []
-        for region in sorted(region_groups.keys()):
-            region_electrodes = region_groups[region]
-            sorted_electrodes = sorted(region_electrodes, key=lambda x: TOPOLOGY[region].index(x[1]))
-            sorted_indices.extend([e[0] for e in sorted_electrodes])
-
-        print("Sorted Indices:", sorted_indices)
+            raise ValueError(
+                "CSBrain --brain_regions must contain exactly one region label for each "
+                "channel in meta.json CHANNELS (in the same order)."
+            )
+        sorted_indices = build_csbrain_channel_layout(channel_names, brain_regions)
+        print("CSBrain channel order from meta.json:", channel_names)
+        print("CSBrain sorted indices:", sorted_indices)
 
         self.backbone = CSBrain(
             in_dim=200, out_dim=200, d_model=200,
@@ -193,7 +130,7 @@ class Model(nn.Module):
             x = F.pad(x, (0, 0, 0, pad_len))  # pad along seq_length dim
         return x
 
-    def supervised(self, x_enc, x_mark_enc):  # x_enc (batch_size, seq_length, enc_in)
+    def supervised(self, x_enc, label_id=None):  # x_enc (batch_size, seq_length, enc_in)
         # padding and channel mapping for loading CBraMod weights
         x_enc = self.pad_to_multiple(x_enc, multiple=200).permute(0, 2, 1)  # pad to multiple of 200
         x_enc = x_enc.view(x_enc.size(0), x_enc.size(1), self.duration, 200)
@@ -203,9 +140,9 @@ class Model(nn.Module):
         out = self.classifier(feats)
         return out
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, fs=None, mask=None):
+    def forward(self, x_enc, label_id=None, mask=None, **kwargs):
         if self.task_name == "supervised" or self.task_name == "finetune":
-            output = self.supervised(x_enc, x_mark_enc)
+            output = self.supervised(x_enc, label_id=label_id)
             return output
         else:
-            raise ValueError("Task name not recognized or not implemented within the LEAD model")
+            raise ValueError("Task name not recognized or not implemented within the CSBrain model")

@@ -1,4 +1,25 @@
-# LEAD: An EEG Foundation Model for Alzheimer's Disease Detection
+
+
+
+<div align="center">
+
+# LEAD: An EEG Foundation Model for Alzheimer's Disease Detection (TMLR 2026)
+
+
+[![Paper](https://img.shields.io/badge/Arxiv-2502.01678-red)](https://arxiv.org/abs/2502.01678)
+[![Paper](https://img.shields.io/badge/Paper-TMLR-008B8B)](https://openreview.net/forum?id=AigNTyxcvH&referrer=%5BAuthor%20Console%5D%28%2Fgroup%3Fid%3DTMLR%2FAuthors%23your-submissions%29)
+[![Datasets](https://img.shields.io/badge/GoogleDrive-Datasets-Green)](https://drive.google.com/drive/folders/1y66f_Id-kal7q8uu-YYF2qTUHfhbPXOX?usp=drive_link)
+[![Checkpoint](https://img.shields.io/badge/GoogleDrive-Checkpoint-FFD21E)](https://drive.google.com/drive/folders/1_XUfU3vZB40rjivkNYf8L2slCahXPo43?usp=drive_link)
+![GitHub Repo stars](https://img.shields.io/github/stars/DL4mHealth/LEAD)
+
+
+#### [Yihe Wang](https://github.com/YiheWang), [Nan Huang](https://github.com/TeddyHuang-00), [Nadia Mammone](https://unirc.unifind.cineca.it/get/person/001110), [Marco Cecchi](https://www.linkedin.com/in/marco-cecchi-81234724/), [Xiang Zhang](http://xiangzhang.info/)
+
+
+</div>
+
+
+
 
 ## Overview
 ![LEAD Pipeline](figs/lead_pipeline.png)
@@ -29,7 +50,7 @@ The classifier produces sample-level predictions that are aggregated into subjec
 Both two-level predictions are used to compute cross-entropy losses.
 
 ## Datasets
-### a) Data Curation
+### a) Data Selection
 We refer to datasets that include Alzheimer's Disease (AD) subjects as AD datasets, 
 while datasets that do not include AD subjects are called non-AD datasets. 
 In total, we have 9 AD datasets and 9 non-AD datasets.
@@ -77,33 +98,33 @@ For datasets lacking prior artifact rejection,
 we utilize independent component analysis (ICA) combined with the ICLabel algorithm 
 to automatically identify and remove components associated with artifacts like eye blinks, or muscle activity.
 5) **Channel Alignment:** 
-We align all pre-training datasets (downstream datasets could be 
-an arbitrary number of channels and montage) to the standard 19-channel montage based on the international 10-20 system: 
+We align all pre-training datasets 
+(our code is adapted to arbitrary channel montage and names as long as they are included in the MNE package, 
+but we empirically found that 19-channel achieves comparable or even better performance on downstream datasets, and raw channels consume much more computational resources) 
+to the standard 19-channel montage based on the international 10-20 system: 
 Fp1, Fp2, F7, F3, Fz, F4, F8, T3/T7, C3, Cz, C4, T4/T8, T5/P7, P3, Pz, P4, T6/P8, O1, and O2. 
 If a dataset has more channels, only the 19 channels with these names are selected, and the rest are discarded. 
 For datasets employing different montages (e.g., Biosemi), 
-signals are projected onto the target 19 channels using their 3D coordinates. 
+we select the 19 closest channels in 3D coordinates. 
 All the fine-tuning datasets keep the raw channel.
-6) **Frequency Alignment:** 
-All datasets are resampled to a uniform sampling frequency of 200 Hz.
-7) **Data Segmentation:**
-We propose a **multi-sampling segmentation** strategy.
+6) **Multi-Scale Segmentation:**
+We use a multi-scale segmentation strategy.
 Instead of resampling all EEG signals to a single fixed sampling rate, 
 we downsample each recording to multiple sampling rates. 
 Specifically, signals with an original sampling rate above 200 Hz are downsampled to 200, 100, and 50 Hz, 
 while those with lower sampling rates are downsampled to 100 and 50 Hz. 
-These three choices could cover almost all sampling rates in scalp EEG datasets. 
-The resulting 200 Hz, 100 Hz, and 50 Hz signals are then segmented 
-into half-overlapping windows of 100, 200, or 400 timestamps, 
-corresponding to 1-second, 2-second, or 4-second segments if at a sampling rate of 100 Hz. 
-Segments shorter than 100, 200 or 400 timestamps at the boundaries are discarded.
+The sample length is fixed in terms of timestamps; 
+for example, a 400-timestamp sample at 200 Hz corresponds to a 2-s EEG segment.
+7) **Metadata Construction:**
+A metadata JSON file is created for each dataset to store information such as the channel montage, 
+channel names, and sampling rates for subsequent model design.
 8) **Z-Score Normalization:**
-Z-score normalization is applied to each segmented sample, computed independently for each channel.
-This step is computed during data loading, not in preprocessing files.
+Z-score normalization is applied to each segmented sample independently for each channel. 
+This step is applied during data loading.
 
 
 ### c) Processed Datasets
-![Statistics of Processed Datasets](figs/processed_datasets.png)
+![Statistics of Processed Datasets](figs/processed_datasets.jpg)
 1) **Datasets Statistics.** We pre-train on 13 datasets: **AD-Auditory**, **BrainLat**, **Depression**, **PEARL-Neuro**, **P-ADIC**, **BACA-RS**, **PD-RS**, **SRM-RS**, **TDBrain**, and **TUEP**, 
 and fine-tuning on 5 downstream datasets: **ADFSU**, **ADFTD**, **ADSZ**, **APAVA**, and **CNBPM**. 
 The pre-training datasets include 9 non-AD neurological diseases or healthy subjects and 4 AD datasets, 
@@ -113,10 +134,9 @@ resulting in a total of **440 subjects, 47.59 hours, and 303,570** samples.
 Download the raw data from the links above in Data Curation and 
 run notebooks in the folder `data_preprocessing/` for each raw dataset to get the processed dataset.
 2) **Datasets Folder Paths.**
-Taking ADFTD as an example, the processed dataset is folder path is `dataset/L400/ADFTD/`,
-where `L400` indicates that the length of samples in this dataset is 400 timestamps (2,4,8 second segments at 200,100,50 Hz).
+Taking ADFTD as an example, the processed dataset is folder path is `dataset/ADFTD/`.
 The folder for each processed dataset has three files: `meta.json`, `X.dat`, and `y.dat`. 
-   - `meta.json`: contains metadata information of the dataset, including the number of samples, timestamps, list of sampling rates, and channel names.
+   - `meta.json`: contains metadata information of the dataset, including the number of samples, timestamps, list of sampling rates, channel montage, channel names, and label information.
    - `X.dat`: contains the EEG features of all samples in the dataset, stored in a numpy memmap file with shape [N-sample, N-timestamp, N-channel].
    - `y.dat`: contains the labels of all samples in the dataset, stored in a numpy memmap file with shape [N-sample, 3],
        where each row is in the format of [label, subject_id / trial_id, sampling_rate_id]
@@ -164,10 +184,10 @@ Don't forget to install cuda version of pytorch in requirements.
 ## Reproduce Experiments
 Before running, make sure you have all the processed datasets put under `dataset/`. 
 You can see the scripts in `scripts/` as a reference. 
-You could also run all the experiments by putting scripts line by line the `meta_run_leadv2.sh`,
-`meta_run_leadv2_ablation_study.sh`, `meta_run_leadv2_case_study.sh`, and `meta_run_baseline_multi.sh` files.
+You could also run all the experiments by putting scripts line by line the `meta_run.sh`,
+`meta_run_ablation_study.sh`, `meta_run_case_study.sh`, and `meta_run_channel_embedding.sh` files.
 The gpu device ids can be specified by setting command line `--devices` (e,g, `--devices 0,1,2,3`). 
-You also need to change the visible gpu devices in script file by setting `export CUDA_VISIBLE_DEVICES` (e,g, `export CUDA_VISIBLE_DEVICES=0,1,2,3`). 
+You also need to change the visible gpu devices in meta script file by setting `export CUDA_VISIBLE_DEVICES` (e,g, `export CUDA_VISIBLE_DEVICES=0,1,2,3`). 
 The gpus specified by commend line should be a subset of visible gpus.
 
 
@@ -181,51 +201,73 @@ The meaning and explanation of each parameter in command line can be found in `r
 ## Quick Start
 Our pre-trained model P-Base can be downloaded [here](https://drive.google.com/drive/folders/1_XUfU3vZB40rjivkNYf8L2slCahXPo43?usp=drive_link)
 and processed downstream datasets can be downloaded [here](https://drive.google.com/drive/folders/1y66f_Id-kal7q8uu-YYF2qTUHfhbPXOX?usp=drive_link).
-After downloading, place the unzipped folder `P-Base` under `checkpoints/LEADv2/pretrain_lead/LEADv2/`.
-Again, take the dataset ADFTD as an example, now you have data path located at `dataset/L400/ADFTD/` 
-and pre-trained model path located at `checkpoints/LEADv2/pretrain_lead/LEADv2/P-Base/nh8_el12_dm128_df256_seed41/checkpoint.pth`.
+After downloading, place the unzipped folder `P-11-b1024-p50-g16-learnable-3D` under `checkpoints/LEAD/pretrain/LEAD/`.
+Again, take the dataset ADFTD as an example, now you have data path located at `dataset/ADFTD/` 
+and pre-trained model path located at `checkpoints/LEAD/pretrain/LEAD/P-11-b1024-p50-g16-learnable-3D/nh8_el12_dm128_df256_seed41/checkpoint.pth`.
 Run following command to fine-tune the pre-trained model on ADFTD dataset:
 
 ```bash
-python -u run.py --method LEADv2 --checkpoints_path ./checkpoints/LEADv2/pretrain_lead/LEADv2/P-Base/nh8_el12_dm128_df256_seed41/checkpoint.pth \
---task_name finetune --is_training 1 --root_path ./dataset/L400/ --model_id P-Base-F-ADFTD-Multi --model LEADv2 --data MultiDatasets \
---training_datasets ADFTD \
---testing_datasets ADFTD \
+python -u run.py --method LEAD --checkpoints_path ./checkpoints/LEAD/pretrain/LEAD/P-11-b1024-p50-g16-learnable-3D/nh8_el12_dm128_df256_seed41/checkpoint.pth \
+--task_name finetune --is_training 1 --root_path ./dataset/ --model_id P-11-b1024-p50-g16-learnable-3D-F-ADFTD-Multi --model LEAD --data MultiDatasets \
+--training_dataset ADFTD \
 --e_layers 12 --batch_size 512 --n_heads 8 --d_model 128 --d_ff 256 \
---augmentations flip,frequency,jitter,mask,channel,drop --patch_len 50 --stride 50 --group_shuffle --group_size 8 --use_subject_loss --sampling_rate_list 200,100,50 \
---ratio_a 0.8 --ratio_b 0.9 --montage_name standard_1005 --channel_names Fp1,Fp2,F7,F3,Fz,F4,F8,T7,C3,Cz,C4,T8,P7,P3,Pz,P4,P8,O1,O2 --use_subject_vote --swa \
---classify_choice multi_class --cross_val mccv --des 'Exp' --itr 5 --learning_rate 0.0001 --train_epochs 200 --patience 15
+--patch_len 50 --stride 50 \
+--temporal_pos_type learnable --channel_pos_type 3D --use_sampling_embedding --sampling_rate_list 200,100,50 --group_shuffle --group_size 4 --use_subject_loss \
+--use_subject_vote --ratio_a 0.8 --ratio_b 0.9 --swa --classify_choice multi_class \
+--des 'Exp' --itr 5 --learning_rate 0.0001 --train_epochs 200 --patience 15
 ```
 
 Some important command line arguments are explained as follows:
 - `--patch_len`: Length of each univariate patch.
 - `--stride`: Stride between two adjacent univariate patches.
+- `--temporal_pos_type`: Type of temporal positional embedding, choices include 'learnable' and 'fixed'.
+- `--channel_pos_type`: Type of channel/spatial positional embedding, choices include '3D', 'learnable', and 'fixed'.
+- `--use_sampling_embedding`: Whether to use sampling rate embedding for multi-scale segmentation.
+- `--sampling_rate_list`: List of sampling rates used in during training.
 - `--group_shuffle`: Whether to use index group shuffling strategy during training.
 - `--group_size`: Number of samples from the same subject in each index group.
 - `--use_subject_loss`: Whether to use subject-level cross-entropy loss for subject-regularized training.
-- `--sampling_rate_list`: List of sampling rates used in during training.
+- `--use_subject_vote`: Whether to use subject-level voting strategy for subject-level detection during inference.
 - `--ratio_a`: Ratio for total number of subjects in training set.
 - `--ratio_b`: Ratio for total number of subjects in training and validation sets.
-- `--montage_name`: Name of the montage used for current dataset.
-- `--channel_names`: Comma-separated list of channel names used in current dataset (in order).
-- `--use_subject_vote`: Whether to use subject-level voting strategy for subject-level detection during inference.
 - `--swa`: Whether to use stochastic weight averaging (SWA) during training.
 - `--classify_choice`: Choice of classification type, 'multi_class' denotes multi-class classification.
 - `--cross_val`: Cross-validation strategy, 'mccv' denotes Monte Carlo subject-independent cross-validation.
 - `--itr`: Number of running iterations.
+- `--patience 15`: Early stopping patience, if the validation loss does not improve for 15 epochs, training will stop early.
 
 
 ## Apply on Your Own Dataset
 To apply the LEAD model on your own EEG dataset for Alzheimer's Disease detection, please follow these steps:
 1) **Data Preprocessing:** Preprocess your raw EEG data following the steps outlined in the "Data Preprocessing" section above. 
-Ensure that your processed dataset is structured similarly to the provided processed datasets, including the `meta.json`, `X.dat`, and `y.dat` files.
+Ensure that your processed dataset is structured similarly to the provided processed datasets, including the `meta.json`, `X.dat`, and `y.dat` files. Be aware that `meta.json` is not just a simple configuration file; it contains essential metadata that the model relies on for proper functioning.
 You can refer to the preprocessing notebooks in the `data_preprocessing/` folder for guidance.
-2) **Place Processed Dataset:** Place your processed dataset in the `dataset/` directory, following the naming convention used for other datasets (e.g., `dataset/L400/YourDatasetName/`).
-3) **Fine-tune the Pre-trained Model:** Use the provided command line interface to fine-tune the pre-trained LEAD model on your dataset. Refer to the "Quick Start" section for an example command.
-4) **Adjust Command Line Arguments:** Modify the command line arguments as needed to match your dataset's characteristics, such as `--montage_name`, `--channel_names`, and `--sampling_rate_list`.
+2) **Place Processed Dataset:** Place your processed dataset in the `dataset/` directory, following the naming convention used for other datasets (e.g., `dataset/YourDatasetName/`).
+3) **Fine-tune the Pre-trained Model:** Use the provided command line interface to fine-tune the pre-trained LEAD model on your dataset. Refer to the [Quick Start](#quick-start) section for an example command.
+4) **Adjust Command Line Arguments:** Modify the command line arguments as needed to match your dataset's characteristics, such as `--sampling_rate_list`.
+
+
+
+## Citation
+
+If you find this repo useful, please star our project and cite our paper.
+
+```
+@article{
+    wang2026lead,
+    title={LEAD: An EEG Foundation Model for Alzheimer's Disease Detection},
+    author={Yihe Wang and Nan Huang and Nadia Mammone and Marco Cecchi and Xiang Zhang},
+    journal={Transactions on Machine Learning Research},
+    issn={2835-8856},
+    year={2026},
+    url={https://openreview.net/forum?id=AigNTyxcvH},
+    note={}
+}
+```
 
 
 
 ## Acknowledgement
-We want to thank the authors of the EEG datasets used in this paper for generously sharing their data. 
-Their efforts and contributions have been invaluable in advancing the field of EEG and EEG-based Alzheimer’s Disease detection.
+We sincerely thank the researchers and clinical teams who collected, curated, and generously made the
+EEG datasets used in this study publicly available. 
+Their efforts in data acquisition and open sharing have been invaluable in advancing EEG-AD research and have made this study possible.

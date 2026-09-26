@@ -1,4 +1,3 @@
-from torch.utils.data import Sampler
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -17,6 +16,22 @@ from sklearn.preprocessing import label_binarize
 import mne
 
 plt.switch_backend('agg')
+
+
+CONFUSION_MATRIX_KEY = "_confusion_matrix"
+
+
+def row_normalized_confusion_matrix(y_true, y_pred, num_classes):
+    """Return a fixed-size row-normalized confusion matrix.
+
+    Rows are true classes and columns are predicted classes. Missing true-class
+    rows are left as zeros so every MCCV run has the same matrix shape.
+    """
+    cm = confusion_matrix(
+        y_true, y_pred, labels=np.arange(int(num_classes))
+    ).astype(np.float64)
+    row_sums = cm.sum(axis=1, keepdims=True)
+    return np.divide(cm, row_sums, out=np.zeros_like(cm), where=row_sums > 0)
 
 
 def adjust_learning_rate(optimizer, epoch, args):
@@ -44,7 +59,7 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_loss_min = np.inf
         self.delta = delta
 
     def __call__(self, val_loss, model, path):
@@ -154,126 +169,87 @@ def multiclass_specificity(y_true, y_pred):
     return np.mean(specificities)
 
 
-class CustomGroupSampler(Sampler):
-    """
-    Group samples by subject ids:
-      1) Sort indices by subject id (stable).
-      2) Split into groups of size `group_size`.
-      3) Shuffle the groups.
-      4) Flatten, then bucketize by `batch_size` and shuffle within each bucket.
-
-    It rebuilds the order at every epoch in __iter__.
-
-    Compatible with:
-      - dataset.global_sids (preferred; index-aligned global subject ids)
-      - dataset.y[:, 1]     (fallback; requires dataset.y to be materialized)
-    """
-    def __init__(self, dataset, batch_size=128, group_size=2):
-        super().__init__(dataset)
-        self.dataset = dataset
-        self.batch_size = int(batch_size)
-        self.group_size = int(group_size)
-
-        # Prefer global_sids prepared by MultiDatasetsLoader (index-aligned)
-        if hasattr(dataset, "global_sids"):
-            self.subject_ids = np.asarray(dataset.global_sids)
-        else:
-            # Fallback: requires dataset.y to exist in memory (not recommended for big data)
-            self.subject_ids = np.asarray(dataset.y)[:, 1]
-
-        assert len(self.subject_ids) == len(self.dataset), \
-            "Length of subject_ids must match dataset length."
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def _make_order(self):
-        # Stable sort by subject id
-        sorted_indices = np.argsort(self.subject_ids, kind="mergesort")
-        N = len(sorted_indices)
-
-        # Group into chunks of size group_size (keep tail)
-        groups = [sorted_indices[i:i + self.group_size] for i in range(0, N, self.group_size)]
-
-        # Shuffle groups
-        rng = np.random.default_rng()
-        rng.shuffle(groups)
-
-        # Flatten
-        order = np.concatenate(groups, axis=0)
-
-        # Bucketize by batch_size and shuffle within buckets
-        batches = [order[i:i + self.batch_size] for i in range(0, len(order), self.batch_size)]
-        for b in batches:
-            rng.shuffle(b)
-        order = np.concatenate(batches, axis=0)
-
-        return order
-
-    def __iter__(self):
-        # Rebuild a different order each epoch
-        order = self._make_order()
-        return iter(order.tolist())
-
-
 def calculate_subject_level_metrics(predictions, true_labels, subject_ids, num_classes):
-    # Step 1: Get unique subject_ids
     unique_subjects = np.unique(subject_ids)
 
-    # Step 2: Aggregate predictions and true labels for each subject_id
     subject_predictions = []
+    subject_scores = []
     subject_trues = []
 
     for subject in unique_subjects:
-        # Find all sample indices for the current subject
         indices = np.where(subject_ids == subject)[0]
+        subject_preds = predictions[indices].astype(int)
+        subject_true = true_labels[indices][0]
 
-        # Get predictions and true labels for the current subject
-        subject_preds = predictions[indices]
-        subject_true = true_labels[indices][0]  # The true_label should be the same for all samples of a subject
+        # Fraction of samples predicted as each class
+        class_counts = np.bincount(subject_preds, minlength=num_classes)
+        class_scores = class_counts / len(subject_preds)
 
-        # Determine the majority vote prediction for the subject
-        majority_label = Counter(subject_preds).most_common(1)[0][0]
+        # Hard subject prediction for Accuracy/F1/etc.
+        majority_label = np.argmax(class_scores)
 
-        # Record subject-level results
         subject_predictions.append(majority_label)
+        subject_scores.append(class_scores)
         subject_trues.append(subject_true)
 
-    # Convert to numpy arrays
-    subject_predictions = np.array(subject_predictions)
-    subject_trues = np.array(subject_trues)
-
-    # Step 3: Calculate metrics
-    # Convert true labels to one-hot encoding for AUROC and AUPRC
-    subject_true_onehot = label_binarize(subject_trues, classes=list(range(num_classes)))
-    subject_probs = label_binarize(subject_predictions, classes=list(range(num_classes)))  # Simplified assumption
+    subject_predictions = np.asarray(subject_predictions)
+    subject_scores = np.asarray(subject_scores)
+    subject_trues = np.asarray(subject_trues)
 
     metrics = {"Accuracy": accuracy_score(subject_trues, subject_predictions)}
-    # Check how many unique classes are present in the true labels
+
     unique_labels = np.unique(subject_trues)
     if len(unique_labels) < 2:
-        # If there is only one class(e,g, leave-one-subject-out validation),
-        # subject-level AUROC and AUPRC are meaningless
         metrics.update({"Precision": -1, "Recall": -1, "Specificity": -1, "F1": -1, "AUROC": -1, "AUPRC": -1})
     else:
         metrics["Precision"] = precision_score(subject_trues, subject_predictions, average="macro")
         metrics["Recall"] = recall_score(subject_trues, subject_predictions, average="macro")
         metrics["Specificity"] = multiclass_specificity(subject_trues, subject_predictions)
         metrics["F1"] = f1_score(subject_trues, subject_predictions, average="macro")
-        metrics["AUROC"] = roc_auc_score(subject_true_onehot, subject_probs, multi_class="ovr")
-        metrics["AUPRC"] = average_precision_score(subject_true_onehot, subject_probs, average="macro")
 
+        if num_classes == 2:
+            metrics["AUROC"] = roc_auc_score(subject_trues, subject_scores[:, 1])
+            metrics["AUPRC"] = average_precision_score(subject_trues, subject_scores[:, 1])
+        else:
+            subject_true_onehot = label_binarize(subject_trues, classes=list(range(num_classes)))
+            metrics["AUROC"] = roc_auc_score(subject_true_onehot, subject_scores, multi_class="ovr", average="macro")
+            metrics["AUPRC"] = average_precision_score(subject_true_onehot, subject_scores, average="macro")
+
+    metrics[CONFUSION_MATRIX_KEY] = row_normalized_confusion_matrix(subject_trues, subject_predictions, num_classes)
     return metrics
+
+
+def _mean_std_confusion_matrices(metrics_dict_list):
+    matrices = np.stack(
+        [np.asarray(metrics[CONFUSION_MATRIX_KEY], dtype=np.float64) for metrics in metrics_dict_list],
+        axis=0,
+    )
+    return matrices.mean(axis=0) * 100.0, matrices.std(axis=0) * 100.0
+
+
+def _format_confusion_matrix(title, mean_matrix, std_matrix):
+    lines = [title]
+    for row_mean, row_std in zip(mean_matrix, std_matrix):
+        lines.append(
+            "  " + "  ".join(
+                f"{mean:.2f}±{std:.2f}" for mean, std in zip(row_mean, row_std)
+            )
+        )
+    return "\n".join(lines)
 
 
 def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict_list,
                     sample_test_metrics_dict_list, subject_test_metrics_dict_list, total_params):
     print('>>>>>>>average testing<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-    # Compute average and std for sample-level metrics
+
+    # Scalar sample-level metrics. Confusion matrices are aggregated separately below.
+    metric_keys = [
+        key for key in sample_val_metrics_dict_list[0].keys()
+        if key != CONFUSION_MATRIX_KEY
+    ]
     sample_val_metrics_dict_avg_std = {}
     sample_test_metrics_dict_avg_std = {}
-    for key in sample_val_metrics_dict_list[0].keys():
-        # convert to percentage
+    for key in metric_keys:
         sample_val_avg = np.mean([val_metrics_dict[key] for val_metrics_dict in sample_val_metrics_dict_list]) * 100
         sample_val_std = np.std([val_metrics_dict[key] for val_metrics_dict in sample_val_metrics_dict_list]) * 100
         sample_test_avg = np.mean([test_metrics_dict[key] for test_metrics_dict in sample_test_metrics_dict_list]) * 100
@@ -282,7 +258,6 @@ def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict
         sample_val_metrics_dict_avg_std[key] = (sample_val_avg, sample_val_std)
         sample_test_metrics_dict_avg_std[key] = (sample_test_avg, sample_test_std)
 
-    # Format results into a single line with two decimal places and percentages
     sample_val_results = "Validation results --- " + ", ".join(
         [f"{key}: {sample_val_metrics_dict_avg_std[key][0]:.2f}+-{sample_val_metrics_dict_avg_std[key][1]:.2f}%"
          for key in sample_val_metrics_dict_avg_std.keys()]
@@ -292,11 +267,16 @@ def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict
          for key in sample_test_metrics_dict_avg_std.keys()]
     )
 
+    subject_val_results = None
+    subject_test_results = None
     if args.use_subject_vote:
-        # Compute average and std for subject-level metrics
+        subject_metric_keys = [
+            key for key in subject_val_metrics_dict_list[0].keys()
+            if key != CONFUSION_MATRIX_KEY
+        ]
         subject_val_metrics_dict_avg_std = {}
         subject_test_metrics_dict_avg_std = {}
-        for key in subject_val_metrics_dict_list[0].keys():
+        for key in subject_metric_keys:
             subject_val_avg = np.mean([val_metrics_dict[key] for val_metrics_dict in subject_val_metrics_dict_list]) * 100
             subject_val_std = np.std([val_metrics_dict[key] for val_metrics_dict in subject_val_metrics_dict_list]) * 100
             subject_test_avg = np.mean([test_metrics_dict[key] for test_metrics_dict in subject_test_metrics_dict_list]) * 100
@@ -314,6 +294,53 @@ def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict
              for key in subject_test_metrics_dict_avg_std.keys()]
         )
 
+    # Each run is row-normalized first; then compute the element-wise mean/std
+    # across runs. Values are converted to percentages only for presentation.
+    sample_val_cm_mean, sample_val_cm_std = _mean_std_confusion_matrices(
+        sample_val_metrics_dict_list
+    )
+    sample_test_cm_mean, sample_test_cm_std = _mean_std_confusion_matrices(
+        sample_test_metrics_dict_list
+    )
+
+    confusion_blocks = [
+        _format_confusion_matrix(
+            "Sample-level Confusion Matrix (Val) [mean±std, %]",
+            sample_val_cm_mean,
+            sample_val_cm_std,
+        ),
+        "",
+        _format_confusion_matrix(
+            "Sample-level Confusion Matrix (Test) [mean±std, %]",
+            sample_test_cm_mean,
+            sample_test_cm_std,
+        ),
+    ]
+
+    if args.use_subject_vote:
+        subject_val_cm_mean, subject_val_cm_std = _mean_std_confusion_matrices(
+            subject_val_metrics_dict_list
+        )
+        subject_test_cm_mean, subject_test_cm_std = _mean_std_confusion_matrices(
+            subject_test_metrics_dict_list
+        )
+        confusion_blocks.extend([
+            "",
+            _format_confusion_matrix(
+                "Subject-level Confusion Matrix (Val) [mean±std, %]",
+                subject_val_cm_mean,
+                subject_val_cm_std,
+            ),
+            "",
+            _format_confusion_matrix(
+                "Subject-level Confusion Matrix (Test) [mean±std, %]",
+                subject_test_cm_mean,
+                subject_test_cm_std,
+            ),
+        ])
+
+    confusion_results = "\n".join(confusion_blocks)
+
     folder_path = (
         "./results/"
         + args.method
@@ -326,14 +353,12 @@ def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict
         + "/"
     )
     file_name = "results.txt"
+    os.makedirs(folder_path, exist_ok=True)
     file_path = os.path.join(folder_path, file_name)
-    # Write results to file
     with open(file_path, 'a') as f:
-        if args.is_training == 1:
-            if 'pretrain' in args.task_name:
-                f.write(f"Pretraining Datasets: {args.pretraining_datasets}\n")
-            f.write(f"Training Datasets: {args.training_datasets}\n")
-        f.write(f"Test Datasets: {args.testing_datasets}\n")
+        if args.is_training == 1 and 'pretrain' in args.task_name:
+            f.write(f"Pretraining Datasets: {args.pretraining_datasets}\n")
+        f.write(f"Downstream Dataset: {args.training_dataset}\n")
         f.write(f"Model_id: {args.model_id}; Model: {args.model}; Total Params: {total_params}\n")
         f.write('Average and std of validation and testing results over {} runs\n'.format(args.itr))
         f.write('Sample-level results: \n')
@@ -343,6 +368,8 @@ def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict
             f.write('Subject-level results after majority voting: \n')
             f.write(subject_val_results + "\n")
             f.write(subject_test_results + "\n")
+        f.write("\nConfusion Matrices (row-normalized; element-wise mean±std across runs; in %):\n")
+        f.write(confusion_results + "\n")
         f.write("\n\n\n")
 
     print('Sample-level results: \n')
@@ -352,6 +379,9 @@ def compute_avg_std(args, sample_val_metrics_dict_list, subject_val_metrics_dict
         print('Subject-level results after majority voting: \n')
         print(subject_val_results)
         print(subject_test_results)
+
+    print('\nConfusion Matrices (row-normalized; element-wise mean±std across runs; in %):')
+    print(confusion_results)
 
 
 def get_metrics_string(val_metrics_dict, test_metrics_dict):
@@ -377,25 +407,30 @@ def get_metrics_string(val_metrics_dict, test_metrics_dict):
 
 
 def get_eeg_coords_from_montage(channel_names, montage_name="standard_1005"):
-    """
-    Given a list of channel names, return their 3D coordinates from the montage.
+    """Return MNE montage coordinates for channel names with clear validation."""
+    if not montage_name:
+        raise ValueError("MONTAGE is missing from meta.json.")
+    if not channel_names:
+        raise ValueError("CHANNELS is missing or empty in meta.json.")
 
-    channel_names: list[str]  e.g. ["Fp1", "Fp2", "C3", "C4"]
-    montage_name: str, default = "standard_1005"
-    return: coords (C, 3) in float32
-    """
+    try:
+        montage = mne.channels.make_standard_montage(montage_name)
+    except Exception as exc:
+        raise ValueError(
+            f"Unknown or unsupported MNE montage '{montage_name}'."
+        ) from exc
 
-    # Load montage
-    montage = mne.channels.make_standard_montage(montage_name)
-
-    # Get mapping: name -> xyz coordinates
     pos_dict = montage.get_positions()["ch_pos"]
+    name_map = {name.lower(): name for name in pos_dict.keys()}
+
+    missing = [name for name in channel_names if name.lower() not in name_map]
+    if missing:
+        raise ValueError(
+            f"Channels {missing} were not found in montage '{montage_name}'. "
+            f"Check meta.json CHANNELS/MONTAGE spelling."
+        )
 
     coords = np.zeros((len(channel_names), 3), dtype=np.float32)
-
     for i, ch_name in enumerate(channel_names):
-        if ch_name not in pos_dict:
-            raise ValueError(f"Channel '{ch_name}' not found in montage '{montage_name}'.")
-        coords[i] = pos_dict[ch_name]  # (3,)
-
+        coords[i] = pos_dict[name_map[ch_name.lower()]]
     return coords
