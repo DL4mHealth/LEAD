@@ -3,7 +3,7 @@
 
 <div align="center">
 
-# LEAD: An EEG Foundation Model for Alzheimer's Disease Detection (TMLR 2026)
+# LEAD: An EEG Foundation Model for Alzheimer's Disease Detection (Transactions on Machine Learning Research 2026)
 
 
 [![Paper](https://img.shields.io/badge/Arxiv-2502.01678-red)](https://arxiv.org/abs/2502.01678)
@@ -28,9 +28,8 @@ We train the world's first EEG foundation model for Alzheimer's Disease (AD) det
 by leveraging the largest EEG-based AD detection dataset to date, which includes 2,238 subjects and 427.81 hours of EEG recordings.
 The LEAD model is **adaptable to EEG data of any length, channel topologies, and diverse sampling rates**,
 enabling flexible end-to-end subject-level AD detection.
-The motivation for this work is to advance research in the domain of EEG-based AD detection and support researchers 
-who face challenges in training models from scratch due to the limited number of AD subjects, 
-as collecting EEG data from patients with AD is costly and time-consuming.
+The motivation for this work is to provide a comprehensive work for EEG-based AD detection, 
+including existing challenges, EEG-AD datasets, robust model design, a training pipeline, post-hoc processing, correct evaluation protocols, current progress, and future directions.
 
 
 ## Details
@@ -142,8 +141,7 @@ The folder for each processed dataset has three files: `meta.json`, `X.dat`, and
        where each row is in the format of [label, subject_id / trial_id, sampling_rate_id]
 3) **Processed Datasets Download link.** 
 The 5 processed downstream datasets can be manually downloaded 
-[here](https://drive.google.com/drive/folders/1y66f_Id-kal7q8uu-YYF2qTUHfhbPXOX?usp=drive_link) for quick start: 
-.
+[here](https://drive.google.com/drive/folders/1y66f_Id-kal7q8uu-YYF2qTUHfhbPXOX?usp=drive_link) for quick start.
 
 
 
