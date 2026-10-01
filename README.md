@@ -9,7 +9,7 @@
 [![Paper](https://img.shields.io/badge/Arxiv-2502.01678-red)](https://arxiv.org/abs/2502.01678)
 [![Paper](https://img.shields.io/badge/Paper-TMLR-008B8B)](https://openreview.net/forum?id=AigNTyxcvH&referrer=%5BAuthor%20Console%5D%28%2Fgroup%3Fid%3DTMLR%2FAuthors%23your-submissions%29)
 [![Datasets](https://img.shields.io/badge/GoogleDrive-Datasets-Green)](https://drive.google.com/drive/folders/1y66f_Id-kal7q8uu-YYF2qTUHfhbPXOX?usp=drive_link)
-[![Checkpoint](https://img.shields.io/badge/GoogleDrive-Checkpoint-FFD21E)](https://drive.google.com/drive/folders/1_XUfU3vZB40rjivkNYf8L2slCahXPo43?usp=drive_link)
+[![Hugging Face](https://img.shields.io/badge/🤗_Hugging_Face-Checkpoint-FFD21E)](https://huggingface.co/YiheWang/LEAD)
 ![GitHub Repo stars](https://img.shields.io/github/stars/DL4mHealth/LEAD)
 
 
@@ -197,10 +197,10 @@ The meaning and explanation of each parameter in command line can be found in `r
 
 
 ## Quick Start
-Our pre-trained model P-Base can be downloaded [here](https://drive.google.com/drive/folders/1_XUfU3vZB40rjivkNYf8L2slCahXPo43?usp=drive_link)
+Our pre-trained model P-Base can be downloaded [here](https://huggingface.co/YiheWang/LEAD)
 and processed downstream datasets can be downloaded [here](https://drive.google.com/drive/folders/1y66f_Id-kal7q8uu-YYF2qTUHfhbPXOX?usp=drive_link).
-After downloading, place the unzipped folder `P-11-b1024-p50-g16-learnable-3D` under `checkpoints/LEAD/pretrain/LEAD/`.
-Again, take the dataset ADFTD as an example, now you have data path located at `dataset/ADFTD/` 
+Place the checkpoints folder and dataset folder in the right directory.
+Take the dataset ADFTD as an example, now you have a data path located at `dataset/ADFTD/` 
 and pre-trained model path located at `checkpoints/LEAD/pretrain/LEAD/P-11-b1024-p50-g16-learnable-3D/nh8_el12_dm128_df256_seed41/checkpoint.pth`.
 Run following command to fine-tune the pre-trained model on ADFTD dataset:
 
