@@ -363,10 +363,65 @@ class Exp_Pretrain(Exp_Basic):
         test_data, test_loader = self._get_data(flag="TEST")
         if test:
             ckpt = os.path.join(self._checkpoint_dir(self.args, setting), "checkpoint.pth")
-            if not os.path.exists(ckpt):
-                raise FileNotFoundError(f"No model found at {ckpt}")
-            self.model.load_state_dict(torch.load(ckpt, map_location=self.device))
-            print(f"Loaded pretraining model from {ckpt}")
+            ckpt_arg = str(getattr(self.args, "checkpoints_path", "") or "").strip()
+            default_ckpt_arg = os.path.normpath("./checkpoints/LEAD/pretrain/LEAD/")
+            if ckpt_arg and os.path.normpath(ckpt_arg) != default_ckpt_arg:
+                ckpt = os.path.join(ckpt_arg, "checkpoint.pth") if os.path.isdir(ckpt_arg) else ckpt_arg
+            if not os.path.isfile(ckpt):
+                raise FileNotFoundError(f"No pretraining checkpoint found at {ckpt}")
+
+            # DataParallel adds 'module.' to saved keys. Normalize both formats
+            # and strictly validate ALL pretraining weights before testing.
+            checkpoint = torch.load(ckpt, map_location=self.device)
+            if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+                checkpoint = checkpoint["state_dict"]
+            if not isinstance(checkpoint, dict):
+                raise TypeError(f"Expected a state_dict in {ckpt}, got {type(checkpoint)}")
+            checkpoint = self._strip_prefixes(checkpoint)
+            target = self._unwrap_model(self.model)
+            target_state = target.state_dict()
+
+            head_keys = {k for k in target_state if k.startswith("projection_head.")}
+            checkpoint_keys = set(checkpoint)
+            missing = sorted(set(target_state) - checkpoint_keys)
+            unexpected = sorted(checkpoint_keys - set(target_state))
+            mismatched = [
+                f"{k}: checkpoint={tuple(checkpoint[k].shape)} vs model={tuple(target_state[k].shape)}"
+                for k in sorted(set(target_state) & checkpoint_keys)
+                if checkpoint[k].shape != target_state[k].shape
+            ]
+
+            missing_backbone = [k for k in missing if k not in head_keys]
+            missing_head = [k for k in missing if k in head_keys]
+            partial_head = bool(missing_head) and bool(head_keys & checkpoint_keys)
+            if missing_backbone or unexpected or mismatched or partial_head:
+                raise RuntimeError(
+                    f"Pretraining checkpoint is incompatible: {ckpt}\n"
+                    f"Missing backbone ({len(missing_backbone)}): {missing_backbone[:12]}\n"
+                    f"Missing projection head ({len(missing_head)}): {missing_head[:12]}\n"
+                    f"Partially saved projection head: {partial_head}\n"
+                    f"Unexpected ({len(unexpected)}): {unexpected[:12]}\n"
+                    f"Shape mismatches ({len(mismatched)}): {mismatched[:12]}\n"
+                    "All backbone tensors and shapes must match."
+                )
+
+            if missing_head:
+                # This is safe ONLY here: linear_probe calls model.encode(),
+                # which does not depend on projection_head parameters.
+                loaded = target.load_state_dict(checkpoint, strict=False)
+                if set(loaded.missing_keys) != head_keys or loaded.unexpected_keys:
+                    raise RuntimeError(
+                        "Unexpected missing/unexpected keys during linear-probe loading: "
+                        f"{loaded}"
+                    )
+                print(
+                    f"Loaded all {len(checkpoint)} available pretrained tensors from {ckpt}. "
+                    f"The {len(head_keys)} projection_head tensors are absent, "
+                    "but they are NOT used by model.encode() for linear probing."
+                )
+            else:
+                target.load_state_dict(checkpoint, strict=True)
+                print(f"Loaded ALL {len(checkpoint)} pretraining tensors from {ckpt}")
 
         sample_val, subject_val = self.linear_probe(train_loader, vali_loader)
         sample_test, subject_test = self.linear_probe(train_loader, test_loader)
